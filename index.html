@@ -564,7 +564,7 @@ function renderSheet(){
       '<label class="sr" for="f-amt">Amount</label><input class="money" id="f-amt" inputmode="numeric" placeholder="₦0" value="' + h(x.amount || "") + '" data-autofocus>';
     if (mode === "out"){
       inner += '<label class="f" for="f-bud">From budget</label><select class="t" id="f-bud">' + budgetOptions(x.budgetId || (S.quick[0] && S.quick[0].budgetId), ["spend","bill"]) + '</select>' +
-        '<label class="f" for="f-note">What for (optional)</label><input class="t" id="f-note" value="' + h(x.note || "") + '" placeholder="Lunch, bike to Rere…">' +
+        '<label class="f" for="f-note">What for (optional)</label><input class="t" id="f-note" value="' + h(x.note || "") + '" placeholder="Lunch, okada to work…">' +
         '<label class="f" for="f-date">Date</label><input class="t" id="f-date" type="date" value="' + (x.date || today()) + '" max="' + today() + '">' +
         '<label class="check"><input type="checkbox" id="f-quick"> Save as a quick button</label>';
     } else {

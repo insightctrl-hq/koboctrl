@@ -450,7 +450,7 @@ function mark(){ return '<span class="mark" aria-label="KoboCTRL">Kobo<b>CTRL</b
 var THEME_KEY = "koboctrl-theme", theme = (function(){ try { return localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light"; } catch(e){ return "light"; } })();
 function applyTheme(){ if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark"); else document.documentElement.removeAttribute("data-theme"); var m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute("content", theme === "dark" ? "#0A100D" : "#F3F5F4"); }
 function render(){
-  if (!S.setupDone){ $("#app").innerHTML = renderSetup(); wireSlides(); focusFirst(); return; }
+  if (!S.setupDone){ $("#app").innerHTML = renderSetup(); wireSlides(); fmtInputs(); focusFirst(); return; }
   var body = V.tab === "spend" ? renderSpend() : V.tab === "progress" ? renderProgress() : V.tab === "settings" ? renderSettings() : renderPlan();
   var tabs = [["plan","Plan"],["spend","Spend"],["progress","Progress"],["settings","Settings"]].map(function(t){
     return '<button class="tab" data-act="tab" data-v="' + t[0] + '"' + (V.tab === t[0] ? ' aria-current="page"' : '') + '>' + IC[t[0]] + '<span>' + t[1] + '</span></button>'; }).join("");
@@ -459,8 +459,18 @@ function render(){
     '<nav class="tabbar" aria-label="Main"><div class="in-bar">' + tabs + '</div></nav>' +
     (V.sheet ? renderSheet() : '') +
     (V.toast ? '<div class="toast" role="status">' + h(V.toast.msg) + (V.toast.undo ? '<button data-act="undo">Undo</button>' : '') + '</div>' : '');
-  if (V.sheet) focusFirst();
+  fmtInputs(); if (V.sheet) focusFirst();
 }
+/* Amount fields show commas as you type, so the zeros are easy to count. Counts and days stay plain. */
+var PLAIN_NUM = {"s-feesm":1, "e-order":1, "e-due":1};
+function isAmountInput(el){ return el && el.tagName === "INPUT" && el.getAttribute("inputmode") === "numeric" && !PLAIN_NUM[el.id]; }
+function withCommas(v){ var d = String(v == null ? "" : v).replace(/[^0-9]/g, "").replace(/^0+(?=\d)/, ""); return d.replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+function fmtInputs(){ var els = document.querySelectorAll('input[inputmode="numeric"]'); for (var i = 0; i < els.length; i++) if (isAmountInput(els[i])) els[i].value = withCommas(els[i].value); }
+document.addEventListener("input", function(e){ var el = e.target; if (!isAmountInput(el)) return;
+  var pos = el.selectionStart == null ? el.value.length : el.selectionStart, digitsBefore = el.value.slice(0, pos).replace(/[^0-9]/g, "").length, out = withCommas(el.value);
+  if (out === el.value) return; el.value = out;
+  var p = 0, seen = 0; while (p < out.length && seen < digitsBefore){ if (/[0-9]/.test(out[p])) seen++; p++; }
+  try { el.setSelectionRange(p, p); } catch(err){} });
 function focusFirst(){ var el = document.querySelector("[data-autofocus]"); if (el) try { el.focus({preventScroll:true}); } catch(e){} }
 function pageTop(title){ return '<header class="top">' + mark() + '</header><h1>' + h(title) + '</h1>'; }
 

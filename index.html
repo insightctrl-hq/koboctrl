@@ -707,7 +707,7 @@ function splitMoves(lines){
 var STEPS = [
   {k:"brand"},
   {k:"intro"},
-  {k:"source", q:"Where does your money come from?"},
+  {k:"source", q:"Where does most of your money come from?"},
   {k:"next", q:function(a){ return a.source === "allowance" ? "When does your next allowance come?" : a.source === "salary" ? "When is your next payday?" : "When does your next money come?"; }, hint:"A rough date is fine. You can change it any time.", when:function(a){ return a.source !== "business"; }},
   {k:"accounts", q:"Which apps hold your money?", hint:function(a){ return (a.source === "allowance" ? "Where does your allowance land?" : a.source === "salary" ? "Where does your salary land?" : a.source === "business" ? "Where do customers pay you?" : "Where does your money land?") + " Where do you spend from daily? Where do you save? One app can do two jobs."; }},
   {k:"food", q:"How much do you spend on food in a day?", hint:"Count every meal, snack, water and suya. Round up, never down."},
@@ -715,7 +715,7 @@ var STEPS = [
   {k:"data", q:"Data and airtime in a week?"},
   {k:"household", q:"Household and personal costs in a month?", hint:"Light (prepaid meter), gas, generator fuel, laundry, toiletries, haircuts and small things."},
   {k:"family", q:function(a){ return a.source === "allowance" ? "Giving in a month?" : "Family support and giving in a month?"; }, hint:function(a){ return a.source === "allowance" ? "Tithe, offerings, contributions and help for friends or siblings. Zero is fine." : "Money you send home, tithe and offerings, ajo or esusu contributions, help for relatives. Zero is fine."; }},
-  {k:"bizcost", q:"Business costs in a month?", hint:"Stock, delivery, packaging and data for selling online. Zero is fine.", when:function(a){ return a.source === "business" || a.source === "mix"; }},
+  {k:"bizcost", q:"Business costs in a month?", hint:"Stock, delivery, packaging and data for selling online. Zero is fine.", when:function(a){ return a.source === "business" || !!a.hustle; }},
   {k:"rent", q:"How much is your rent in a year?", hint:"Put zero if you do not pay rent. Hostel fees can go here too.", when:function(a){ return a.source !== "allowance"; }},
   {k:"fees", q:"How much is each school fees payment?", hint:"Then tell us how many months between payments. Put zero if you do not pay fees.", when:function(a){ return a.source !== "allowance"; }},
   {k:"goal", q:"What are you saving toward?", hint:"Add as many goals as you like. Tap a suggestion or type your own, then tap Add goal."},
@@ -762,11 +762,12 @@ function wireSlides(){ var el = document.getElementById("slides"); if (!el) retu
   el.addEventListener("scroll", function(){ var i = Math.round(el.scrollLeft / el.clientWidth); if (i !== (V.slide || 0)){ V.slide = i;
     var ds = document.querySelectorAll("#dots i"); for (var k = 0; k < ds.length; k++) ds[k].className = k === i ? "on" : "";
     var btn = document.querySelector('[data-act="intro-next"]'); if (btn) btn.textContent = i >= INTRO.length - 1 ? "Set up my plan" : "Next"; } }, {passive:true}); }
-var SOURCES = [["allowance","Pocket money or allowance"],["salary","Salary or a job"],["business","My business or hustle"],["mix","A mix of these"]];
+var SOURCES = [["allowance","Pocket money or allowance"],["salary","Salary or a job"],["business","My business or hustle"]];
 function stepOn(i){ var s = STEPS[i]; return !!s && (!s.when || s.when(V.setup.a)); }
 function nextStep(i){ i++; while (i < STEPS.length - 1 && !stepOn(i)) i++; return i; }
 function prevStep(i){ i--; while (i > 1 && !stepOn(i)) i--; return Math.max(0, i); }
-function goalIdeas(src){ if (src === "allowance") return ["Laptop", "New phone", "Detty December", "Christmas travel", "Course or exam fees", "Business capital"];
+function goalIdeas(src, hustle){ var list = goalIdeasFor(src); if (hustle && src !== "business") list = ["Business capital"].concat(list.filter(function(n){ return n !== "Business capital"; })); return list; }
+function goalIdeasFor(src){ if (src === "allowance") return ["Laptop", "New phone", "Detty December", "Christmas travel", "Course or exam fees", "Business capital"];
   if (src === "business") return ["Business capital", "Festive season stock", "Rent renewal", "Laptop", "Land", "Car"]; return GOAL_IDEAS; }
 var GOAL_IDEAS = ["Rent renewal", "Laptop", "Japa fund", "Detty December", "Wedding or owambe", "Christmas travel", "Land", "Car", "Business capital"];
 function pushGoal(){ var a = V.setup.a; a.goals = a.goals || []; var n = (a.goalName || "").trim(), m = parseAmt(a.goalAmt); if (n && m){ a.goals.push({name:n, amt:m, date:a.goalDate || ""}); a.goalName = ""; a.goalAmt = ""; a.goalDate = ""; return true; } return false; }
@@ -785,7 +786,8 @@ function renderSetup(){
       '<div class="foot" style="display:flex;gap:10px;padding:16px 0 calc(20px + env(safe-area-inset-bottom,0px))"><button class="btn ghost" data-act="intro-back">Back</button><button class="btn primary" style="flex:1" data-act="intro-next">' + (last ? 'Set up my plan' : 'Next') + '</button></div></div>';
   }
   if (s.k === "source"){
-    body = '<div class="choices">' + SOURCES.map(function(o){ return '<button class="choice" data-act="pick-source" data-v="' + o[0] + '" aria-pressed="' + (V.setup.a.source === o[0]) + '">' + h(o[1]) + '</button>'; }).join("") + '</div>';
+    body = '<div class="choices">' + SOURCES.map(function(o){ return '<button class="choice" data-act="pick-source" data-v="' + o[0] + '" aria-pressed="' + (V.setup.a.source === o[0]) + '">' + h(o[1]) + '</button>'; }).join("") + '</div>' +
+      (V.setup.a.source && V.setup.a.source !== "business" ? '<label class="check" style="margin-top:14px"><input type="checkbox" data-act="toggle-hustle"' + (V.setup.a.hustle ? ' checked' : '') + '> I also run a business or hustle</label>' : '');
   } else if (s.k === "next"){
     body = '<label class="sr" for="s-next">Date</label><input class="t" id="s-next" type="date" min="' + today() + '" value="' + h(sv("next", "")) + '" data-autofocus>';
   } else if (s.k === "accounts"){
@@ -798,7 +800,7 @@ function renderSetup(){
   } else if (s.k === "goal"){
     var gl = V.setup.a.goals || [];
     body = (gl.length ? '<div class="card" style="padding:4px 16px;margin-bottom:12px">' + gl.map(function(g, i){ return '<div class="kv"><span>' + h(g.name) + '<br><small class="muted">' + naira(parseAmt(g.amt)) + (g.date ? ' · by ' + h(g.date) : '') + '</small></span><button class="link" data-act="goal-del" data-v="' + i + '">Remove</button></div>'; }).join("") + '</div>' : '') +
-      '<div class="chips">' + goalIdeas(V.setup.a.source).map(function(n){ return '<button class="chip" data-act="goal-idea" data-v="' + h(n) + '">' + h(n) + '</button>'; }).join("") + '</div>' +
+      '<div class="chips">' + goalIdeas(V.setup.a.source, V.setup.a.hustle).map(function(n){ return '<button class="chip" data-act="goal-idea" data-v="' + h(n) + '">' + h(n) + '</button>'; }).join("") + '</div>' +
       '<label class="f" for="s-goal">Goal</label><input class="t" id="s-goal" value="' + h(sv("goalName", "")) + '" placeholder="e.g. Laptop" data-autofocus>' +
       '<label class="f" for="s-goala">Amount</label><input class="t" id="s-goala" inputmode="numeric" value="' + h(sv("goalAmt", "")) + '" placeholder="₦0">' +
       '<label class="f" for="s-goald">By</label><input class="t" id="s-goald" type="month" value="' + h(sv("goalDate", "")) + '">' +
@@ -850,7 +852,7 @@ function buildFromSetup(){
   add({name:"Reward", group:"Savings", kind:"pot", period:"month", amount:0, order:9, account:sp.id, reward:true});
   S.budgets = bs;
   S.quick = food ? [{label:"Meal", amount:Math.round(food / 2 / 100) * 100 || food, budgetId:bs[0].id}] : [];
-  S.source = src; S.nextMoney = on("next") ? (a.next || "") : ""; S.setupDone = true; S.started = t; S.monthKey = mk(); S.streak.checked = addDays(t, -1); save();
+  S.source = src; S.hustle = src !== "business" && !!a.hustle; S.nextMoney = on("next") ? (a.next || "") : ""; S.setupDone = true; S.started = t; S.monthKey = mk(); S.streak.checked = addDays(t, -1); save();
 }
 function monthsUntilFrom(k){ return monthsUntil(k); }
 
@@ -892,7 +894,8 @@ document.addEventListener("click", function(e){
     case "opening": { var oa = openingAmount(); if (!oa) break; snap(); S.tx.push({id:uid(), type:"in", opening:true, account:acctByRole("income").id, amount:oa, note:"Money I had at the start", date:today(), at:Date.now()}); save(); openSheet("split", {opening:true}); break; }
     case "log-in": openSheet("log", {mode:"in"}); break;
     case "save-next": S.nextMoney = val("f-next"); closeSheet(); save(); toast("Saved."); break;
-    case "pick-source": V.setup.a.source = v; break;
+    case "pick-source": V.setup.a.source = v; if (v === "business") V.setup.a.hustle = false; break;
+    case "toggle-hustle": V.setup.a.hustle = el.checked; break;
     case "confirm-split": {
       var lines = proposeSplit(toAssign()), m = mk(); snap();
       lines.forEach(function(l){ S.tx.push({id:uid(), type:"alloc", budgetId:l.id, amount:l.amount, month:m, date:today()}); });

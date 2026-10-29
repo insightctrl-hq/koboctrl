@@ -237,7 +237,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "0.5.1";
+var VERSION = "0.6";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -337,10 +337,14 @@ function rekey(){ S.tx.forEach(function(t){ if (t.type === "alloc" || t.type ===
 
 /* ---------- Budget maths ---------- */
 function refillMonthly(b){ return round100((b.amount || 0) / Math.max(1, b.every || 1)); }
+/* A commitment with a due date needs what is still missing, spread over the months left. The balance at the start of the cycle is used, so the figure holds steady while the cycle runs. */
+function commitAmt(b){ if (b.targetDate && b.target){ var base = potBalance(b) - funded(b); return Math.max(0, round100((b.target - base) / Math.max(1, monthsUntil(b.targetDate)))); } return b.amount || 0; }
+function rollMonths(b){ return b.roll || (b.amount ? Math.max(1, Math.round((b.target || 0) / b.amount)) : 12); }
 /* True monthly cost, used to compare the plan with monthly income. */
 function monthlyNeed(b){
   if (b.paused || b.retired || b.kind === "sf" || isGoal(b) || b.sweep || b.reward) return 0;
   if (b.kind === "floor") return b.amount || 0;
+  if (isCommit(b)) return commitAmt(b);
   if (b.kind === "refill") return refillMonthly(b);
   if (b.period === "day") return b.amount * daysInMonth();
   if (b.period === "week") return round100(b.amount * daysInMonth() / 7);
@@ -349,6 +353,7 @@ function monthlyNeed(b){
 /* What a budget needs for one cycle. */
 function cycNeed(b, key){ if (b.paused || b.retired || b.kind === "sf" || isGoal(b) || b.sweep || b.reward || b.kind === "floor") return 0;
   key = key || cyc(); var wk = cycDef().every === "week", days = cycDays(key);
+  if (isCommit(b)){ var cm = commitAmt(b); return wk ? round100(cm * 12 / 52) : cm; }
   if (b.kind === "refill") return round100(refillMonthly(b) * (wk ? 12 / 52 : 1));
   if (b.period === "day") return b.amount * days;
   if (b.period === "week") return wk ? b.amount : round100(b.amount * days / 7);
@@ -361,7 +366,7 @@ function spentCyc(b, k){ k = k || cyc(); var e = cycEnd(k); return spentIn(b, k,
   + sumTx(function(t){ return t.type === "sweep" && t.from === b.id && t.month === k; }); }
 function spentMonth(b, k){ return spentCyc(b, k); }
 function potBalance(b){ return (b.start || 0) + sumTx(function(t){ return (t.type === "alloc" || t.type === "sweepIn" || t.type === "repayIn") && t.budgetId === b.id; })
-  - sumTx(function(t){ return (t.type === "withdraw" && t.budgetId === b.id) || (t.type === "cover" && t.from === b.id); }); }
+  - sumTx(function(t){ return (t.type === "withdraw" && t.budgetId === b.id) || (t.type === "cover" && t.from === b.id) || (t.type === "potSpend" && t.budgetId === b.id); }); }
 /* Money set aside for a refill item keeps building until it is bought. It is never swept away. */
 function refillBal(b){ return (b.start || 0) + sumTx(function(t){ return (t.type === "alloc" && t.budgetId === b.id) || (t.type === "cover" && t.to === b.id); })
   - sumTx(function(t){ return (t.type === "out" && t.budgetId === b.id) || ((t.type === "cover" || t.type === "sweep") && t.from === b.id); }); }
@@ -507,6 +512,7 @@ function acctBalance(a){
     if (t.type === "in" && !t.opening && t.account === a.id) bal += t.amount;
     if (t.type === "out"){ var b = B(t.budgetId); if ((t.account || (b && b.account)) === a.id) bal -= t.amount; }
     if (t.type === "move"){ if (t.to === a.id) bal += t.amount; if (t.from === a.id) bal -= t.amount; }
+    if (t.type === "potSpend"){ var pb = B(t.budgetId); if ((t.account || (pb && pb.account)) === a.id) bal -= t.amount; }
     if (t.type === "adjust" && t.account === a.id) bal += t.amount;
   });
   return bal;
@@ -520,7 +526,7 @@ function weeklyAllowance(){
 }
 
 /* ---------- Score, streaks, badges ---------- */
-function loggedOn(k){ return S.tx.some(function(t){ return (t.type === "out" || t.type === "nospend") && t.date === k; }); }
+function loggedOn(k){ return S.tx.some(function(t){ return (t.type === "out" || t.type === "nospend" || t.type === "potSpend") && t.date === k; }); }
 function weekScore(ws){
   var now = today(), end = addDays(ws, 6), last = now < end ? now : end, days = 0, logged = 0, overs = 0, unrec = 0, broke = 0, from = S.started && S.started > ws ? S.started : ws;
   for (var k = from; k <= last; k = addDays(k, 1)){ days++; if (loggedOn(k) || S.streak.frozen[k]) logged++; }
@@ -673,6 +679,7 @@ function upNext(){
   Object.keys(S.raise || {}).forEach(function(id){ var rb = B(id); if (!rb || rb.retired) return; items.push({t:rb.name + " keeps going over", s:"Raise it to " + naira(S.raise[id]) + perWord(rb.period) + "?", act:"raise-open", id:id, btn:"See"}); });
   Object.keys(S.topups || {}).forEach(function(id){ var tb = B(id), tp = S.topups[id]; if (!tb || tb.retired || tb.paused || tp.key !== cyc()){ delete S.topups[id]; return; }
     var rem = Math.min(tp.amt, cycNeed(tb) - funded(tb)); if (rem < 10) return; items.push({t:"Top up " + tb.name, s:naira(rem) + " more is needed " + cycWord() + " after your change.", act:"topup", id:id, btn:"Top up"}); });
+  S.budgets.forEach(function(b){ if (isCommit(b) && !b.paused && !b.retired && !b.targetDate) items.push({t:"When is " + b.name + " due?", s:"The date sets how much to put aside each month.", act:"edit-simple", id:b.id, btn:"Set"}); });
   S.budgets.forEach(function(b){ if (b.bundle && !b.retired && !S.dismissed["bundle" + b.id]) items.push({t:"Break " + b.name + " into items", s:"Gas, light and haircuts each get their own budget.", act:"break-open", id:b.id, btn:"Start"}); });
   if (S.close && !S.close.seen) items.push({t:closeLabel() + " is closed", s:S.close.lines[0], act:"close-view", btn:"See"});
   if (!S.tx.some(function(t){ return t.type === "in"; })){ var op = openingAmount();
@@ -849,13 +856,13 @@ function renderSpend(){
     planned.map(function(b){ var v = budgetView(b); return '<button class="chip" data-act="plan-log" data-id="' + b.id + '">' + h(b.name) + '<small>' + (prefillAmt(b) ? naira(b.amount) : naira(Math.max(0, v.left)) + ' left') + '</small></button>'; }).join("") +
     q.map(function(c, i){ return '<button class="chip" data-act="quick" data-i="' + i + '">' + h(c.label) + '<small>' + naira(c.amount) + '</small></button>'; }).join("") +
     '<button class="chip" data-act="sheet" data-v="log">Other…</button>' + (loggedOn(today()) ? '' : '<button class="chip" data-act="nospend">No spending today</button>') + '</div></section>';
-  var tx = S.tx.filter(function(t){ return t.type === "out" || t.type === "in" || t.type === "nospend"; }).slice().sort(function(a, b){ return a.date < b.date ? 1 : a.date > b.date ? -1 : (b.at || 0) - (a.at || 0); }).slice(0, 80);
+  var tx = S.tx.filter(function(t){ return t.type === "out" || t.type === "in" || t.type === "nospend" || t.type === "potSpend"; }).slice().sort(function(a, b){ return a.date < b.date ? 1 : a.date > b.date ? -1 : (b.at || 0) - (a.at || 0); }).slice(0, 80);
   if (!tx.length) html += '<div class="card empty">Nothing yet. Tap a button above or the + to log your first entry.</div>';
   var day = null, open = false;
   tx.forEach(function(t){
     if (t.date !== day){ if (open) html += '</div></section>'; day = t.date; open = true; html += '<section><div class="label day-head">' + h(fmtDay(day)) + '</div><div class="card list" style="padding:0">'; }
     var b = B(t.budgetId), a = A(t.account), title = t.type === "in" ? (t.note || "Money in") : t.type === "nospend" ? "No spending" : (t.note || (b ? b.name : "Spending"));
-    var sub = t.type === "in" ? "Into " + (a ? a.name : "account") : t.type === "nospend" ? "Logged a no-spend day" : (b ? b.name : "") + (t.unrecorded ? " · found at balance check" : "");
+    var sub = t.type === "in" ? "Into " + (a ? a.name : "account") : t.type === "nospend" ? "Logged a no-spend day" : (b ? b.name : "") + (t.type === "potSpend" ? " · from savings" : "") + (t.unrecorded ? " · found at balance check" : "");
     html += '<button class="item" data-act="tx" data-id="' + t.id + '"><span class="l"><b>' + h(title) + '</b><span>' + h(sub) + '</span></span><span class="r num' + (t.type === "in" ? ' in' : '') + '">' + (t.type === "nospend" ? '✓' : (t.type === "in" ? '+' : '') + naira(t.amount)) + '</span></button>';
   });
   if (open) html += '</div></section>';
@@ -900,6 +907,7 @@ function roleLabel(r){ return r === "income" ? "Money lands here" : r === "spend
 function sheetWrap(title, inner, opts){ opts = opts || {};
   return '<div class="scrim" data-act="close-sheet"><div class="sheet" role="dialog" aria-modal="true" aria-label="' + h(title) + '" data-stop="1"><div class="grab"></div><div class="sheet-head"><h2>' + h(title) + '</h2><button class="link" data-act="close-sheet">' + (opts.cancel || "Close") + '</button></div>' + inner + '</div></div>'; }
 function budgetOptions(sel, kinds){ return S.budgets.filter(function(b){ return kinds.indexOf(b.kind) >= 0 && !b.paused && !b.retired; }).map(function(b){ return '<option value="' + b.id + '"' + (b.id === sel ? ' selected' : '') + '>' + h(b.name) + '</option>'; }).join(""); }
+function potOptions(sel){ var l = S.budgets.filter(function(b){ return isPot(b) && !b.retired && potBalance(b) > 0; }); if (!l.length) return ""; return '<optgroup label="From savings">' + l.map(function(b){ return '<option value="' + b.id + '"' + (b.id === sel ? " selected" : "") + ">" + h(b.name) + " (" + naira(potBalance(b)) + ")</option>"; }).join("") + "</optgroup>"; }
 function acctOptions(sel){ return S.accounts.map(function(a){ return '<option value="' + a.id + '"' + (a.id === sel ? ' selected' : '') + '>' + h(a.name) + '</option>'; }).join(""); }
 function renderSheet(){
   var s = V.sheet, x = s.data || {};
@@ -908,7 +916,7 @@ function renderSheet(){
     var inner = '<div class="seg" role="group" aria-label="Type"><button data-act="log-mode" data-v="out" aria-pressed="' + (mode === "out") + '">Money out</button><button data-act="log-mode" data-v="in" aria-pressed="' + (mode === "in") + '">Money in</button></div>' +
       '<label class="sr" for="f-amt">Amount</label><input class="money" id="f-amt" inputmode="numeric" placeholder="₦0" value="' + h(x.amount || "") + '" data-autofocus>';
     if (mode === "out"){
-      inner += '<label class="f" for="f-bud">From budget</label><select class="t" id="f-bud">' + budgetOptions(x.budgetId || (S.quick[0] && S.quick[0].budgetId), ["spend","bill","refill"]) + '</select>' +
+      inner += '<label class="f" for="f-bud">From budget</label><select class="t" id="f-bud">' + budgetOptions(x.budgetId || (S.quick[0] && S.quick[0].budgetId), ["spend","bill","refill"]) + potOptions(x.budgetId) + '</select>' +
         '<label class="f" for="f-note">What for (optional)</label><input class="t" id="f-note" value="' + h(x.note || "") + '" placeholder="Lunch, okada to work…">' +
         '<label class="f" for="f-date">Date</label><input class="t" id="f-date" type="date" value="' + (x.date || today()) + '" max="' + today() + '">' +
         '<label class="check"><input type="checkbox" id="f-quick"> Save as a quick button</label>';
@@ -953,7 +961,7 @@ function renderSheet(){
       if (protectedPot(b)){ var held = (A(b.account) || {}).name || "your savings app";
         inner3 += b.realLock ? '<div class="note" style="margin-top:12px">Locked in ' + h(held) + '. <button class="link" data-act="real-unlock" data-id="' + b.id + '">Mark as not locked</button></div>'
           : '<div class="note" style="margin-top:12px"><b>Lock this in ' + h(held) + '.</b> Savings apps such as PiggyVest and Cowrywise can lock money until a date, so it is truly out of reach.<div style="margin-top:10px"><button class="btn primary" data-act="real-lock" data-id="' + b.id + '">I\u2019ve locked it</button></div></div>'; }
-      inner3 += '<div style="display:flex;gap:10px;margin-top:18px;flex-wrap:wrap"><button class="btn ghost" data-act="withdraw-open" data-id="' + b.id + '">Take money out</button><button class="btn ghost" data-act="edit-simple" data-id="' + b.id + '">Edit</button></div>';
+      inner3 += '<div style="display:flex;gap:10px;margin-top:18px;flex-wrap:wrap"><button class="btn primary" data-act="plan-log" data-id="' + b.id + '"' + (potBalance(b) > 0 ? '' : ' disabled') + '>Pay from this pot</button><button class="btn ghost" data-act="withdraw-open" data-id="' + b.id + '">Move money out</button>' + (isGoal(b) && S.tx.some(function(t){ return t.type === "potSpend" && t.budgetId === b.id; }) ? '<button class="btn ghost" data-act="bought" data-id="' + b.id + '">Bought it</button>' : '') + '<button class="btn ghost" data-act="edit-simple" data-id="' + b.id + '">Edit</button></div>';
     } else if (b.kind === "bill"){
       inner3 += '<div class="big num" style="font-size:48px">' + naira(b.amount) + '</div><p class="muted">' + (b.dueDay ? 'Due on the ' + ordinal(b.dueDay) + ' of each month.' : 'Monthly.') + ' ' + (v.isPaid ? 'Paid this month.' : naira(b.amount - v.paid) + ' still to pay.') + '</p>' +
         '<div class="kv"><span>Funded this month</span><span>' + naira(v.funded) + '</span></div><div class="kv"><span>Paid from</span><span>' + h((A(b.account) || {}).name || "") + '</span></div>' +
@@ -1015,7 +1023,7 @@ function renderSheet(){
     var qG = isGoal(qb), qC = isCommit(qb), qR = qb.kind === "refill", qS = qb.kind === "spend", qB = qb.kind === "bill", qf = '';
     if (qG) qf += '<label class="f" for="q-target">How much you need</label><input class="t" id="q-target" inputmode="numeric" value="' + (qb.target || "") + '" data-autofocus><label class="f" for="q-tdate">Ready by (optional)</label><input class="t" id="q-tdate" type="month" value="' + h(qb.targetDate || "") + '">';
     else {
-      qf += '<label class="f" for="q-amt">' + (qR ? "What it costs" : qC ? "Set aside each month" : qB ? "Bill amount" : "Amount") + '</label><input class="t" id="q-amt" inputmode="numeric" value="' + (qb.amount || "") + '" data-autofocus>';
+      if (!(qC && qb.targetDate)) qf += '<label class="f" for="q-amt">' + (qR ? "What it costs" : qC ? "Set aside each month" : qB ? "Bill amount" : "Amount") + '</label><input class="t" id="q-amt" inputmode="numeric" value="' + (qb.amount || "") + '" data-autofocus>';
       if (qS) qf += '<label class="f" for="q-per">How often</label><select class="t" id="q-per">' + [["day", "Every day"], ["week", "Every week"], ["month", "Every month"]].map(function(o){ return '<option value="' + o[0] + '"' + (qb.period === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join("") + '</select>';
       if (qR) qf += '<label class="f" for="q-every">How often you buy it</label>' + everySelect("q-every", qb.every || 1);
       if (qC) qf += '<label class="f" for="q-target">Total you need</label><input class="t" id="q-target" inputmode="numeric" value="' + (qb.target || "") + '"><label class="f" for="q-tdate">Must be ready by</label><input class="t" id="q-tdate" type="month" value="' + h(qb.targetDate || "") + '">';
@@ -1112,6 +1120,13 @@ function breakText(b){ if (!b) return ""; if (b.kind === "floor") return "This i
   return b.name + (b.targetDate ? " is due " + fmtMonth(b.targetDate) : "") + ". Taking money out puts that at risk."; }
 function overText(x){ var b = B(x.bid); if (!b) return ""; if (b.kind === "refill"){ var rbl = Math.max(0, refillBal(b)); return "You have " + naira(rbl) + " set aside for " + b.name + ". This uses " + naira(x.amt - rbl) + " more than that."; } var v = budgetView(b), over = x.amt - Math.max(0, v.left), per = b.period === "day" ? "day" : b.period === "week" ? "week" : "month";
   return b.name + " has " + naira(Math.max(0, v.left)) + " left. This puts it " + naira(over) + " over, and the extra comes off your next " + per + "."; }
+/* Paying from a savings pot sends the money to its purpose. It needs no cooldown and breaks no lock. */
+function potSpendLog(lg){ var b = B(lg.bid); if (lg.amt > potBalance(b)){ toast("Only " + naira(potBalance(b)) + " is in " + b.name + "."); return; }
+  snap(); S.tx.push({id:uid(), type:"potSpend", budgetId:b.id, amount:lg.amt, account:b.account, note:lg.note || "", date:lg.date || today(), at:Date.now()});
+  var rolled = false;
+  if (isCommit(b) && b.targetDate){ var paid = sumTx(function(t){ return t.type === "potSpend" && t.budgetId === b.id && t.date >= (b.rolledAt || "0000"); });
+    if (paid >= (b.target || 0) * 0.9){ var d = parseDk(b.targetDate + "-01"); d.setMonth(d.getMonth() + rollMonths(b)); b.targetDate = d.getFullYear() + "-" + pad(d.getMonth() + 1); b.rolledAt = today(); rolled = true; } }
+  closeSheet(); save(); toast("Paid " + naira(lg.amt) + " from " + b.name + (rolled ? ". Next due " + fmtMonth(b.targetDate) + "." : "."), true); }
 function logOut(lg){ snap(); var b = B(lg.bid); S.tx.push({id:uid(), type:"out", budgetId:lg.bid, amount:lg.amt, note:lg.note || "", date:lg.date || today(), at:Date.now()});
   if (lg.quick){ S.quick.unshift({label:lg.note || b.name, amount:lg.amt, budgetId:lg.bid}); S.quick = S.quick.slice(0, 8); }
   closeSheet(); save(); var bv = budgetView(b);
@@ -1234,7 +1249,7 @@ function renderSetup(){
       '<label class="f" for="s-acc-save">I save in</label><input class="t" id="s-acc-save" value="' + h(sv("accSave", "")) + '" placeholder="e.g. Cowrywise">';
   } else if (s.k === "fees"){
     body = '<label class="f" for="s-fees">Each payment</label><input class="t" id="s-fees" inputmode="numeric" value="' + h(sv("fees", "")) + '" placeholder="₦0" data-autofocus>' +
-      '<label class="f" for="s-feesm">Months between payments</label><input class="t" id="s-feesm" inputmode="numeric" value="' + h(sv("feesMonths", "3")) + '">';
+      '<label class="f" for="s-feesm">Months between payments</label><input class="t" id="s-feesm" inputmode="numeric" value="' + h(sv("feesMonths", "3")) + '"><label class="f" for="s-feesdue">When is the next payment due?</label><input class="t" id="s-feesdue" type="month" value="' + h(sv("feesDue", "")) + '">';
   } else if (s.k === "goal"){
     var gl = V.setup.a.goals || [];
     body = (gl.length ? '<div class="card" style="padding:4px 16px;margin-bottom:12px">' + gl.map(function(g, i){ return '<div class="kv"><span>' + h(g.name) + '<br><small class="muted">' + naira(parseAmt(g.amt)) + (g.date ? ' · by ' + h(g.date) : '') + (g.fixed ? ' · fixed date' : '') + '</small></span><button class="link" data-act="goal-del" data-v="' + i + '">Remove</button></div>'; }).join("") + '</div>' : '') +
@@ -1251,7 +1266,7 @@ function renderSetup(){
   } else if (s.k === "balances"){
     body = accNames().map(function(n, i){ return '<label class="f" for="s-bal-' + i + '">' + h(n) + '</label><input class="t" id="s-bal-' + i + '" inputmode="numeric" value="' + h(sv("bal" + i, "")) + '" placeholder="₦0"' + (i === 0 ? ' data-autofocus' : '') + '>'; }).join("");
   } else {
-    body = '<label class="sr" for="s-val">Amount</label><input class="money" id="s-val" inputmode="numeric" placeholder="₦0" value="' + h(sv(s.k, "")) + '" data-autofocus>' +
+    body = '<label class="sr" for="s-val">Amount</label><input class="money" id="s-val" inputmode="numeric" placeholder="₦0" value="' + h(sv(s.k, "")) + '" data-autofocus>' + (s.k === "rent" ? '<label class="f" for="s-rentdue">When is it next due?</label><input class="t" id="s-rentdue" type="month" value="' + h(sv("rentDue", "")) + '">' : '') +
       (s.per ? '<label class="f" for="s-per">Per</label><select class="t" id="s-per">' + [["day","Day"],["week","Week"],["month","Month"]].map(function(o){ return '<option value="' + o[0] + '"' + (sv(s.k + "Per", s.per) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join("") + '</select>' : '');
   }
   var dots = ''; for (var i = 2; i < STEPS.length; i++) if (stepOn(i)) dots += '<i class="' + (i <= st ? 'on' : '') + '"></i>';
@@ -1267,10 +1282,10 @@ function readSetupStep(){
   if (s.k === "fit"){ return; }
   if (s.k === "household"){ a.hh = {}; a.hhEvery = {}; hhItems(a.source).forEach(function(n, i){ a.hh[n] = val("s-hh-" + i); a.hhEvery[n] = +val("s-he-" + i) || 1; }); a.hhName = val("s-hh-name"); a.hhX = val("s-hh-x"); a.hhXe = +val("s-he-x") || 1; return; }
   if (s.k === "accounts"){ a.accIncome = val("s-acc-income"); a.accSpend = val("s-acc-spend"); a.accSave = val("s-acc-save"); }
-  else if (s.k === "fees"){ a.fees = val("s-fees"); a.feesMonths = val("s-feesm"); }
+  else if (s.k === "fees"){ a.fees = val("s-fees"); a.feesMonths = val("s-feesm"); a.feesDue = val("s-feesdue"); }
   else if (s.k === "goal"){ a.goalName = val("s-goal"); a.goalAmt = val("s-goala"); a.goalDate = val("s-goald"); var gf = document.getElementById("s-goalfix"); if (gf) a.goalFix = gf.checked; pushGoal(); }
   else if (s.k === "balances"){ accNames().forEach(function(n, i){ a["bal" + i] = val("s-bal-" + i); }); }
-  else if (s.k !== "brand" && s.k !== "intro"){ a[s.k] = val("s-val"); if (document.getElementById("s-per")) a[s.k + "Per"] = val("s-per"); }
+  else if (s.k !== "brand" && s.k !== "intro"){ a[s.k] = val("s-val"); if (s.k === "rent") a.rentDue = val("s-rentdue"); if (document.getElementById("s-per")) a[s.k + "Per"] = val("s-per"); }
 }
 function buildFromSetup(){
   var a = V.setup.a, pl = planFromSetup(a), inc = setupIncome(a), bs = pl.budgets;
@@ -1296,8 +1311,8 @@ function planFromSetup(a){
   add({name:"Save first", group:"Savings", kind:"sf", pct:10, min:500, order:0});
   if (fam) add({name:src === "allowance" ? "Giving" : "Family and giving", group:"Giving and family", kind:"bill", period:"month", amount:fam, order:3, account:inc.id, dueDay:1});
   if (biz) add({name:"Business costs", group:"Business", kind:"spend", period:"month", amount:biz, order:3, account:inc.id});
-  var rent = on("rent") ? parseAmt(a.rent) : 0; if (rent) add({name:"Rent", group:"Savings", kind:"pot", period:"month", amount:round100(rent / 12), order:4, account:sa.id, target:rent, fixed:true});
-  var fees = on("fees") ? parseAmt(a.fees) : 0, fm = Math.max(1, parseAmt(a.feesMonths) || 1); if (fees) add({name:"School fees", group:"Savings", kind:"pot", period:"month", amount:round100(fees / fm), order:4, account:sa.id, target:fees, fixed:true});
+  var rent = on("rent") ? parseAmt(a.rent) : 0; if (rent) add({name:"Rent", group:"Savings", kind:"pot", period:"month", amount:round100(rent / 12), order:4, account:sa.id, target:rent, fixed:true, targetDate:a.rentDue || "", roll:12});
+  var fees = on("fees") ? parseAmt(a.fees) : 0, fm = Math.max(1, parseAmt(a.feesMonths) || 1); if (fees) add({name:"School fees", group:"Savings", kind:"pot", period:"month", amount:round100(fees / fm), order:4, account:sa.id, target:fees, fixed:true, targetDate:a.feesDue || "", roll:fm});
   (a.goals || []).slice().sort(function(x, y){ return (x.fixed ? x.date || "9999" : "zzzz") < (y.fixed ? y.date || "9999" : "zzzz") ? -1 : 1; }).forEach(function(g, gi){
     add({name:g.name, group:"Savings", kind:"pot", period:"month", amount:0, order:6, account:sa.id, target:g.amt, targetDate:g.date || "", goal:true, deadline:!!g.fixed, qpos:101 + gi}); });
   add({name:"Emergency money", group:"Savings", kind:"floor", period:"month", amount:0, order:7, account:sa.id, start:parseAmt(a.emergency)});
@@ -1316,7 +1331,7 @@ function closeSheet(){ var bk = V.sheet && V.sheet.data && V.sheet.data.back; V.
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
 function val(id){ var el = document.getElementById(id); return el ? el.value : ""; }
 
-var SCN_BLOCK = ["save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "unlock", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics"];
+var SCN_BLOCK = ["save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "unlock", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought"];
 document.addEventListener("click", function(e){
   var el = e.target.closest("[data-act]"); if (!el) return;
   if (el.getAttribute("data-act") === "close-sheet" && e.target.closest("[data-stop]") && !e.target.closest("button")) return;
@@ -1334,6 +1349,7 @@ document.addEventListener("click", function(e){
       if ((V.sheet.data.mode || "out") === "out"){
         var lg = {bid:val("f-bud"), amt:amt, note:val("f-note").trim(), date:d, quick:!!(document.getElementById("f-quick") && document.getElementById("f-quick").checked)}, lb0 = B(lg.bid);
         /* Going over today's plan: ask whether it already happened. Logging what already happened is never delayed. */
+        if (lb0 && isPot(lb0)){ potSpendLog(lg); break; }
         if (lb0 && d === today() && ((lb0.kind === "spend" && amt > Math.max(0, budgetView(lb0).left)) || (lb0.kind === "refill" && amt > Math.max(0, refillBal(lb0))))){ openSheet("overcheck", lg); break; }
         logOut(lg);
       } else {
@@ -1421,7 +1437,7 @@ document.addEventListener("click", function(e){
       if (es.kind === "sf") openSheet("sf-edit", {id:id, back:bk0}); else if (es.kind === "floor" || es.sweep || es.reward) openSheet("edit-budget", {id:id, back:bk0}); else openSheet("edit-simple", {id:id, back:bk0}); break; }
     case "save-simple": { var sb = B(id); if (!sb) break;
       if (isGoal(sb)){ var tg = parseAmt(val("q-target")); if (!tg){ toast("Type how much you need."); break; } snap(); sb.target = tg; sb.targetDate = val("q-tdate"); sb.deadline = !!sb.targetDate && !!sb.deadline; }
-      else { var nam = parseAmt(val("q-amt")); if (!nam){ toast("Type an amount."); break; } snap();
+      else { var nam = document.getElementById("q-amt") ? parseAmt(val("q-amt")) : sb.amount; if (!nam && !(isCommit(sb) && val("q-tdate"))){ toast("Type an amount."); break; } snap();
         var oldNeed = cycNeed(sb), once = val("q-scope") === "once";
         if (once && !sb.revert) sb.revert = {amount:sb.amount, period:sb.period, every:sb.every || 1, key:cyc()};
         if (!once) delete sb.revert;
@@ -1446,6 +1462,10 @@ document.addEventListener("click", function(e){
       snap(); if (leftA > 0){ S.tx.push({id:uid(), type:"sweep", from:ab.id, amount:leftA, month:cyc(), date:today()}); S.tx.push({id:uid(), type:"sweepIn", budgetId:stA.id, amount:leftA, date:today()}); }
       ab.retired = true; ab.paused = true; ab.archived = true; delete ab.revert; S.quick = S.quick.filter(function(q5){ return q5.budgetId !== id; }); if (S.topups) delete S.topups[id]; if (S.raise) delete S.raise[id];
       closeSheet(); save(); toast(ab.name + " archived. Its history stays.", true); break; }
+    case "bought": { var bg = B(id); if (!bg) break; var left2 = potBalance(bg); snap();
+      if (left2 > 0){ S.tx.push({id:uid(), type:"withdraw", budgetId:bg.id, amount:left2, note:"Left after buying", date:today()}); S.tx.push({id:uid(), type:"release", amount:left2, budgetId:bg.id, date:today()});
+        if (bg.account && bg.account !== acctByRole("income").id) S.tx.push({id:uid(), type:"move", from:bg.account, to:acctByRole("income").id, amount:left2, date:today()}); }
+      bg.retired = true; bg.paused = true; bg.archived = true; closeSheet(); save(); toast(bg.name + " done." + (left2 > 0 ? " " + naira(left2) + " is waiting to be split." : ""), true); break; }
     case "restore-budget": { var rb3 = B(id); if (!rb3) break; snap(); rb3.retired = false; rb3.paused = false; rb3.archived = false; save(); toast(rb3.name + " is back.", true); break; }
     case "scn-start": { V.scenario = {snap:JSON.stringify(S), was:{plan:planMonthly(S.budgets), spare:spareMonthly()}}; V.sheet = null; V.tab = "plan"; undoState = null; break; }
     case "scn-apply": { V.scenario = null; save(); toast("Scenario applied."); break; }

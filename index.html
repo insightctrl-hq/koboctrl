@@ -238,7 +238,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "0.7";
+var VERSION = "0.8";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -266,7 +266,7 @@ function round100(n){ return Math.ceil(n / 100) * 100; }
 /* ---------- State ---------- */
 var S, V = {tab:"plan", sheet:null, toast:null, setup:{step:0, a:{}}};
 function freshState(){ return {v:1, setupDone:false, accounts:[], budgets:[], tx:[], flags:{}, unlocks:[], repay:[], monthKey:mk(), close:null,
-  streak:{checked:today(), freezes:0, frozen:{}}, scoreWeeks:{}, quick:[], settings:{floorMonths:3, surcharge:5}, lastBackup:0, lastChange:0, source:"", nextMoney:"", income:null, fitSnooze:"", cool:{}, dismissed:{}, overHist:{}, raise:{}, topups:{}, pending:[], payAnchor:""}; }
+  streak:{checked:today(), freezes:0, frozen:{}}, scoreWeeks:{}, quick:[], settings:{floorMonths:3, surcharge:5}, lastBackup:0, lastChange:0, source:"", nextMoney:"", income:null, fitSnooze:"", cool:{}, dismissed:{}, overHist:{}, raise:{}, topups:{}, pending:[], cycles:[], payAnchor:""}; }
 /* Plain names for the groups and pots that older versions created. */
 var GROUP_RENAME = {"Essentials":"Daily needs", "Buffer":"Cushion", "Commitments":"Giving and family"}, NAME_RENAME = {"Emergency floor":"Emergency money", "Runway":"Leftovers", "Buffer":"Cushion"};
 function migrate(x){ (x.budgets || []).forEach(function(b){ if (GROUP_RENAME[b.group]) b.group = GROUP_RENAME[b.group]; if (NAME_RENAME[b.name]) b.name = NAME_RENAME[b.name]; delete b.business;
@@ -292,6 +292,7 @@ function upgrade(){ var ch = false;
     S.budgets.forEach(function(b){ if (b.kind === "pot" && b.fixed && b.name !== "Rent" && b.name !== "School fees"){ b.fixed = false; b.goal = true; b.deadline = !!b.targetDate; b.amount = 0; b.order = 6; if (b.qpos === undefined) b.qpos = 100; } });
   }
   if (S.cycSig !== JSON.stringify(cycDef())){ rekey(); ch = true; }
+  if (!isCalendar() && !(S.cycles && S.cycles.length)){ pinCycle(); ch = true; }
   if (!S.mig4){
     if (!sfBudget()) S.budgets.push({id:uid(), created:today(), name:"Save first", group:"Savings", kind:"sf", pct:10, min:500, order:0});
     var st = sweepTarget(), k = cyc();
@@ -315,13 +316,24 @@ function sumTx(fn){ var t = 0; for (var i = 0; i < S.tx.length; i++) if (fn(S.tx
 /* A budget cycle runs from one payday to the next. With no payday set, it is the calendar month. */
 function cycDef(){ var inc = S.income; if (inc && inc.amount && S.payAnchor) return {every:inc.every === "week" ? "week" : "month", anchor:S.payAnchor}; return {every:"month", anchor:""}; }
 function cycAt(y, m, day){ var first = new Date(y, m, 1); return dk(new Date(first.getFullYear(), first.getMonth(), Math.min(day, daysInMonth(first)))); }
+/* A cycle starts on the day the pay is recorded. The payday date is only the plan: until pay arrives, the old cycle stays open. */
 function cycOf(k){ var d = cycDef();
+  if (d.anchor && S.cycles && S.cycles.length){ var best = ""; for (var i = 0; i < S.cycles.length; i++) if (S.cycles[i] <= k && S.cycles[i] > best) best = S.cycles[i]; if (best) return best; }
+  return nomOf(k); }
+function nomOf(k){ var d = cycDef();
   if (d.every === "week"){ var diff = Math.round((parseDk(k) - parseDk(d.anchor)) / 864e5), off = ((diff % 7) + 7) % 7; return addDays(k, -off); }
   var day = d.anchor ? +d.anchor.slice(8, 10) : 1, p = parseDk(k), s = cycAt(p.getFullYear(), p.getMonth(), day);
   return s > k ? cycAt(p.getFullYear(), p.getMonth() - 1, day) : s; }
 function cyc(){ return cycOf(today()); }
-function cycEnd(key){ var d = cycDef(); if (d.every === "week") return addDays(key, 6);
-  var day = d.anchor ? +d.anchor.slice(8, 10) : 1, p = parseDk(key); return addDays(cycAt(p.getFullYear(), p.getMonth() + 1, day), -1); }
+function nomEnd(key){ var d = cycDef(); if (d.every === "week") return addDays(key, 6);
+  var day = d.anchor ? +d.anchor.slice(8, 10) : 1, p = parseDk(key), st = cycAt(p.getFullYear(), p.getMonth(), day);
+  return addDays(st > key ? st : cycAt(p.getFullYear(), p.getMonth() + 1, day), -1); }
+function cycEnd(key){ var d = cycDef(), nom = nomEnd(key);
+  if (d.anchor && S.cycles && S.cycles.length){ var nx = ""; for (var i = 0; i < S.cycles.length; i++) if (S.cycles[i] > key && (!nx || S.cycles[i] < nx)) nx = S.cycles[i]; if (nx) return addDays(nx, -1);
+    var t = today(); return nom < t && cycOf(t) === key ? t : nom; }
+  return nom; }
+/* Pin the cycle that is open now, so payday morning does not close it before the pay is in. */
+function pinCycle(){ S.cycles = []; if (!isCalendar()) S.cycles = [cycOf(today())]; rekey(); }
 function dayDiff(a, b){ return Math.round((parseDk(b) - parseDk(a)) / 864e5); }
 function cycDays(key){ return dayDiff(key, cycEnd(key)) + 1; }
 function cycDaysLeft(){ return dayDiff(today(), cycEnd(cyc())) + 1; }
@@ -342,13 +354,14 @@ function refillMonthly(b){ return round100((b.amount || 0) / Math.max(1, b.every
 function commitAmt(b){ if (b.targetDate && b.target){ var base = potBalance(b) - funded(b); return Math.max(0, round100((b.target - base) / Math.max(1, monthsUntil(b.targetDate)))); } return b.amount || 0; }
 function rollMonths(b){ return b.roll || (b.amount ? Math.max(1, Math.round((b.target || 0) / b.amount)) : 12); }
 /* True monthly cost, used to compare the plan with monthly income. */
+var AVG_MONTH = 365.25 / 12;
 function monthlyNeed(b){
   if (b.paused || b.retired || b.kind === "sf" || isGoal(b) || b.sweep || b.reward) return 0;
   if (b.kind === "floor") return b.amount || 0;
   if (isCommit(b)) return commitAmt(b);
   if (b.kind === "refill") return refillMonthly(b);
-  if (b.period === "day") return b.amount * daysInMonth();
-  if (b.period === "week") return round100(b.amount * daysInMonth() / 7);
+  if (b.period === "day") return Math.round(b.amount * AVG_MONTH);
+  if (b.period === "week") return round100(b.amount * AVG_MONTH / 7);
   return b.amount || 0;
 }
 /* What a budget needs for one cycle. */
@@ -401,7 +414,7 @@ function safeToday(){
 function lastLogDay(){ var f = null; S.tx.forEach(function(t){ if ((t.type === "out" || t.type === "nospend") && (!f || t.date > f)) f = t.date; }); return f; }
 /* Honest date: money you can count on, divided by the faster of your plan pace and your real pace over the last 14 days. */
 function coveredUntil(){
-  var have = Math.max(0, toAssign()), planDay = 0, spendPlanDay = 0, st = sweepTarget(), dim = daysInMonth();
+  var have = Math.max(0, toAssign()), planDay = 0, spendPlanDay = 0, st = sweepTarget(), dim = AVG_MONTH;
   S.budgets.forEach(function(b){ if (b.paused || b.retired || isPot(b) || b.kind === "refill" || b.kind === "sf") return; var m = monthlyNeed(b); planDay += m / dim; if (b.kind === "spend") spendPlanDay += m / dim; var v = budgetView(b); have += Math.max(0, v.leftMonth); });
   if (st) have += Math.max(0, potBalance(st));
   if (!planDay) return null;
@@ -521,7 +534,7 @@ function acctBalance(a){
 function weeklyAllowance(){
   var spendAcct = acctByRole("spend"), t = 0;
   S.budgets.forEach(function(b){ if (b.kind !== "spend" || b.paused || b.retired || b.account !== spendAcct.id) return; var v = budgetView(b), add;
-    if (b.period === "day") add = b.amount * 7 - carried(b); else if (b.period === "week") add = b.amount - carried(b); else add = round100(b.amount * 7 / daysInMonth());
+    if (b.period === "day") add = b.amount * 7 - carried(b); else if (b.period === "week") add = b.amount - carried(b); else add = round100(b.amount * 7 / cycDays(cyc()));
     t += Math.max(0, Math.min(add, Math.max(0, v.leftMonth))); });
   return round100(t);
 }
@@ -634,7 +647,7 @@ function atRisk(bs, income){ var spare = Math.max(0, income - sfMin(bs) - living
     var r = spare, rem = Math.max(0, (b.target || 0) - potBalance(b)); spare = 0;
     var mo = r > 0 ? Math.ceil(rem / r) : 0; out.push({b:b, need:m, can:r, readyKey:r > 0 && mo <= 36 ? addMonths(mo) : "", tooLong:r > 0 && mo > 36}); });
   return out; }
-function fromMonthly(b, m){ var dim = daysInMonth(); if (b.period === "day") return Math.floor(m / dim / 50) * 50; if (b.period === "week") return Math.floor(m * 7 / dim / 100) * 100; return Math.floor(m / 100) * 100; }
+function fromMonthly(b, m){ var dim = AVG_MONTH; if (b.period === "day") return Math.floor(m / dim / 50) * 50; if (b.period === "week") return Math.floor(m * 7 / dim / 100) * 100; return Math.floor(m / 100) * 100; }
 /* The plan that fits keeps the Save first minimum, trims spending if it must, never cuts refills or commitments, and lowers the Save first rate last. */
 function fitPlan(bs, income){
   var cut = bs.filter(function(b){ return !b.paused && !b.retired && (b.kind === "spend" || b.kind === "bill") && monthlyNeed(b) > 0; }), cutTotal = 0, fixedLiving = 0, out = [];
@@ -1332,7 +1345,7 @@ function buildFromSetup(){
   if (inc && (a.fitChoice || "fit") === "fit" && planMonthly(bs, toMonthly(inc)) > toMonthly(inc)) applyFit(bs, toMonthly(inc));
   S.accounts = pl.accounts; S.budgets = bs; S.income = inc; var t = today(), food = parseAmt(a.food);
   S.quick = []; S.mig3 = true; S.mig4 = true;
-  S.source = pl.src; S.hustle = pl.src !== "business" && !!a.hustle; S.nextMoney = pl.on("next") ? (a.next || "") : ""; S.payAnchor = inc && S.nextMoney ? S.nextMoney : ""; S.setupDone = true; S.started = t; S.cycSig = JSON.stringify(cycDef()); S.monthKey = cyc(); S.streak.checked = addDays(t, -1); save();
+  S.source = pl.src; S.hustle = pl.src !== "business" && !!a.hustle; S.nextMoney = pl.on("next") ? (a.next || "") : ""; S.payAnchor = inc && S.nextMoney ? S.nextMoney : ""; S.setupDone = true; S.started = t; S.cycSig = JSON.stringify(cycDef()); S.cycles = []; if (!isCalendar()) S.cycles = [cycOf(today())]; S.monthKey = cyc(); S.streak.checked = addDays(t, -1); save();
 }
 function planFromSetup(a){
   var names = accNames(), accts = names.map(function(n, i){ return {id:uid(), name:n, role:"other", start:parseAmt(a["bal" + i])}; });
@@ -1394,8 +1407,11 @@ document.addEventListener("click", function(e){
         logOut(lg);
       } else {
         snap(); S.tx.push({id:uid(), type:"in", account:val("f-acct"), amount:amt, note:val("f-src").trim(), date:d, at:Date.now()});
+        var stepNext = function(k){ return S.income && S.income.every === "week" ? addDays(k, 7) : addMonthsTo(k, 1); }, last = S.cycles && S.cycles.length ? S.cycles.reduce(function(m, z){ return z > m ? z : m; }, "") : "";
+        var isPay = !isCalendar() && S.nextMoney && d >= addDays(S.nextMoney, -3) && S.income && amt >= S.income.amount * 0.5 && (!last || d >= addDays(last, 5));
+        if (isPay){ S.cycles.push(d); monthClose(); if (!(val("f-next") && val("f-next") > today())){ var nk2 = stepNext(S.nextMoney); while (nk2 <= d) nk2 = stepNext(nk2); S.nextMoney = nk2; } }
         if (val("f-next") && val("f-next") > today()) S.nextMoney = val("f-next");
-        else if (S.nextMoney && S.nextMoney <= addDays(today(), 3)){ var nk = S.nextMoney; while (nk <= today()) nk = S.income && S.income.every === "week" ? addDays(nk, 7) : addMonthsTo(nk, 1); S.nextMoney = nk; }
+        else if (!isPay && S.nextMoney && S.nextMoney <= addDays(today(), 3)){ var nk = S.nextMoney; while (nk <= today()) nk = stepNext(nk); S.nextMoney = nk; }
         save(); openSheet("split"); toast("Added " + naira(amt) + ".", true);
       }
       break; }
@@ -1426,7 +1442,7 @@ document.addEventListener("click", function(e){
     case "split": openSheet("split"); break;
     case "opening": { var oa = openingAmount(); if (!oa) break; snap(); S.tx.push({id:uid(), type:"in", opening:true, account:acctByRole("income").id, amount:oa, note:"Money I had at the start", date:today(), at:Date.now()}); save(); openSheet("split", {opening:true}); break; }
     case "log-in": openSheet("log", {mode:"in"}); break;
-    case "save-next": { S.nextMoney = val("f-next"); var ia = parseAmt(val("f-inc")); S.income = ia ? {amount:ia, every:val("f-every") === "week" ? "week" : "month"} : null; S.payAnchor = S.income && S.nextMoney ? S.nextMoney : ""; upgrade(); closeSheet(); save(); toast("Saved."); break; }
+    case "save-next": { S.nextMoney = val("f-next"); var ia = parseAmt(val("f-inc")); S.income = ia ? {amount:ia, every:val("f-every") === "week" ? "week" : "month"} : null; S.payAnchor = S.income && S.nextMoney ? S.nextMoney : ""; S.cycles = []; upgrade(); pinCycle(); closeSheet(); save(); toast("Saved."); break; }
     case "possible": openSheet("possible", {id:id}); break;
     case "save-possible": { var spb = B(id), na = parseAmt(val("mp-amt")), nd = val("mp-date"); if (!na){ toast("Type an amount."); break; } snap(); spb.target = na; if (nd) spb.targetDate = nd; if (isGoal(spb)) spb.deadline = !!nd; closeSheet(); save(); toast(spb.name + " updated.", true); break; }
     case "goal-top": { var gt = B(id), mn = goalQueue().reduce(function(m2, g){ return Math.min(m2, g.qpos || 0); }, 100); snap(); gt.qpos = mn - 1; save(); openSheet("possible", {id:id}); toast(gt.name + " moved to the front.", true); break; }
@@ -1499,7 +1515,7 @@ document.addEventListener("click", function(e){
         if (delta > 0){ var fr = sb.kind === "spend" && sb.period !== "month" ? cycDaysLeft() / cycDays(cyc()) : 1, tu = Math.round(delta * fr / 10) * 10; if (tu >= 10){ S.topups = S.topups || {}; S.topups[sb.id] = {amt:tu, key:cyc()}; } }
       }
       S.fitSnooze = ""; var sInc = monthlyIncome(), sGap = sInc ? planMonthly(S.budgets) - sInc : 0; closeSheet(); save(); toast(sGap > 0 ? "Saved. Your plan now costs " + naira(sGap) + " more than you get." : "Saved.", true); break; }
-    case "save-income": { snap(); var nsrc = val("ep-src"); if (nsrc) S.source = nsrc; S.nextMoney = val("f-next"); var nia = parseAmt(val("f-inc")); S.income = nia ? {amount:nia, every:val("f-every") === "week" ? "week" : "month"} : null; S.payAnchor = S.income && S.nextMoney ? S.nextMoney : ""; S.fitSnooze = ""; upgrade();
+    case "save-income": { snap(); var nsrc = val("ep-src"); if (nsrc) S.source = nsrc; S.nextMoney = val("f-next"); var nia = parseAmt(val("f-inc")); S.income = nia ? {amount:nia, every:val("f-every") === "week" ? "week" : "month"} : null; S.payAnchor = S.income && S.nextMoney ? S.nextMoney : ""; S.fitSnooze = ""; S.cycles = []; upgrade(); pinCycle();
       var iGap = S.income ? planMonthly(S.budgets) - monthlyIncome() : 0; save(); toast(iGap > 0 ? "Saved. Your plan costs " + naira(iGap) + " more than you get." : "Saved.", true); break; }
     case "topup": { var tb2 = B(id), tp2 = S.topups && S.topups[id]; if (!tb2 || !tp2) break; var rem2 = Math.min(tp2.amt, cycNeed(tb2) - funded(tb2)), av = toAssign();
       if (rem2 < 10){ delete S.topups[id]; save(); break; }

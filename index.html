@@ -135,6 +135,7 @@ nav.tabbar .in-bar{max-width:560px;margin:0 auto;display:grid;grid-template-colu
 .sheet-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
 .sheet-head h2{font-family:var(--sans);font-size:24px;font-weight:800;letter-spacing:-.02em}
 .link{background:none;border:0;color:var(--blue);font-weight:600;cursor:pointer;padding:6px 0}
+.savewarn{position:sticky;top:0;z-index:60;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;background:var(--red);color:#fff;font-weight:600;font-size:14px}.savewarn button{background:#fff;color:var(--red);border:0;border-radius:999px;padding:6px 14px;font-weight:700;cursor:pointer}
 .h1row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0 18px}.h1row h1{margin:0}
 .erow{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;padding:12px 0;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer;color:inherit;font:inherit}
 .scn{border:1.5px solid var(--gold,#C9A227);margin-bottom:14px}.scn-btns{display:flex;gap:8px;margin-top:12px}.scn-btns .btn{flex:1;padding-left:8px;padding-right:8px}
@@ -236,7 +237,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "0.5";
+var VERSION = "0.5.1";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -275,7 +276,11 @@ function migrate(x){ (x.budgets || []).forEach(function(b){ if (GROUP_RENAME[b.g
   /* One time: undo the pauses the old plan-that-fits put on savings with fixed dates. */
   if (!x.mig3){ (x.budgets || []).forEach(function(b){ if (b.fixed && b.paused) b.paused = false; }); x.mig3 = true; }
   return x; }
-function normalise(x){ var f = freshState(); if (!x || typeof x !== "object") return f; for (var k in f) if (x[k] === undefined) x[k] = f[k]; return migrate(x); }
+function normalise(x){ var f = freshState(); if (!x || typeof x !== "object") return f; for (var k in f) if (x[k] === undefined) x[k] = f[k];
+  /* A close keeps one undo copy, with no earlier close inside it. Old data is flattened, and a copy older than a week is dropped. */
+  if (x.close && x.close.snapshot){ if (Date.now() - (x.close.at || 0) > 7 * 864e5) x.close.snapshot = null;
+    else if (x.close.snapshot.length > 20000 || x.close.snapshot.indexOf('"snapshot"') >= 0){ try { var inner = JSON.parse(x.close.snapshot); inner.close = null; x.close.snapshot = JSON.stringify(inner); } catch(e){ x.close.snapshot = null; } } }
+  return migrate(x); }
 /* Upgrades that need the live state: payday cycles, Save first, refills, goals on their own tab. */
 function upgrade(){ var ch = false;
   if (!S.mig4){
@@ -568,7 +573,7 @@ function monthNoBreak(){ var m = mk(); if (!firstLogDay() || firstLogDay().slice
 /* ---------- Cycle close (automatic) ---------- */
 function monthClose(){
   var cur = cyc(); if (S.monthKey === cur) return false;
-  var prev = S.monthKey, prevEnd = cycEnd(prev), snapshot = JSON.stringify(S), st = sweepTarget(), rp = rewardPot(), swept = 0, carriedBills = 0, lines = [];
+  var prev = S.monthKey, prevEnd = cycEnd(prev), prevClose = S.close, snapshot = (S.close = null, JSON.stringify(S)), st = sweepTarget(), rp = rewardPot(), swept = 0, carriedBills = 0, lines = [];
   var weeks = Object.keys(S.scoreWeeks).filter(function(w){ return w >= prev && w <= prevEnd; }), avg = weeks.length ? weeks.reduce(function(a, w){ return a + S.scoreWeeks[w]; }, 0) / weeks.length : 0;
   S.overHist = S.overHist || {}; S.raise = S.raise || {};
   S.budgets.forEach(function(b){
@@ -702,7 +707,7 @@ function render(){
   var body = V.tab === "spend" ? renderSpend() : V.tab === "goals" ? renderGoals() : V.tab === "progress" ? renderProgress() : V.tab === "settings" ? renderSettings() : renderPlan();
   var tabs = [["plan","Plan"],["spend","Spend"],["goals","Goals"],["progress","Progress"],["settings","Settings"]].map(function(t){
     return '<button class="tab" data-act="tab" data-v="' + t[0] + '"' + (V.tab === t[0] ? ' aria-current="page"' : '') + '>' + IC[t[0]] + '<span>' + t[1] + '</span></button>'; }).join("");
-  $("#app").innerHTML = '<div class="wrap">' + (V.scenario ? scnBanner() : '') + body + '</div>' +
+  $("#app").innerHTML = (storageOK ? '' : '<div class="savewarn" role="alert"><span>Your changes are not being saved.</span><button data-act="backup">Back up now</button></div>') + '<div class="wrap">' + (V.scenario ? scnBanner() : '') + body + '</div>' +
     (V.scenario ? '' : '<button class="fab" data-act="sheet" data-v="log" aria-label="Record money in or out">' + IC.plus + '</button>') +
     '<nav class="tabbar" aria-label="Main"><div class="in-bar">' + tabs + '</div></nav>' +
     (V.sheet ? renderSheet() : '') +
@@ -1085,7 +1090,7 @@ function renderSheet(){
     return sheetWrap("Up next", upNext().map(function(n){ return '<div class="card next' + (n.alert ? ' alert' : '') + '" style="margin-bottom:10px"><div class="txt"><b>' + h(n.t) + '</b><span>' + h(n.s) + '</span></div><button class="btn primary" data-act="' + n.act + '"' + (n.id ? ' data-id="' + n.id + '"' : '') + '>' + n.btn + '</button></div>'; }).join(""));
   }
   if (s.type === "close-view"){
-    return sheetWrap(closeLabel() + " closed", '<div class="card" style="padding:4px 16px">' + S.close.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div><p class="small muted" style="margin-top:12px">Spending leftovers move to ' + h(sweepTarget() ? sweepTarget().name : "savings") + '. Savings pots keep their balance. Unpaid bills carry over.</p><div style="display:flex;gap:10px;margin-top:14px"><button class="btn primary" style="flex:1" data-act="close-ok">Got it</button><button class="btn ghost" data-act="close-undo">Undo</button></div>');
+    return sheetWrap(closeLabel() + " closed", '<div class="card" style="padding:4px 16px">' + S.close.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div><p class="small muted" style="margin-top:12px">Spending leftovers move to ' + h(sweepTarget() ? sweepTarget().name : "savings") + '. Savings pots keep their balance. Unpaid bills carry over.</p><div style="display:flex;gap:10px;margin-top:14px"><button class="btn primary" style="flex:1" data-act="close-ok">Got it</button>' + (S.close.snapshot ? '<button class="btn ghost" data-act="close-undo">Undo</button>' : '') + '</div>');
   }
   if (s.type === "backup"){
     var txt = backupText();
@@ -1306,7 +1311,7 @@ function monthsUntilFrom(k){ return monthsUntil(k); }
 var undoState = null;
 function toast(msg, undo){ V.toast = {msg:msg, undo:!!undo}; clearTimeout(toast.t); toast.t = setTimeout(function(){ V.toast = null; undoState = null; render(); }, undo ? 6000 : 2600); }
 function snap(){ undoState = JSON.stringify(S); }
-function backupText(){ var o = JSON.parse(JSON.stringify(S)); o.app = "KoboCTRL"; o.appVersion = VERSION; o.savedAt = new Date().toISOString(); return JSON.stringify(o); }
+function backupText(){ var o = JSON.parse(JSON.stringify(S)); if (o.close) o.close.snapshot = null; o.app = "KoboCTRL"; o.appVersion = VERSION; o.savedAt = new Date().toISOString(); return JSON.stringify(o); }
 function closeSheet(){ var bk = V.sheet && V.sheet.data && V.sheet.data.back; V.sheet = bk ? {type:bk, data:{}} : null; }
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
 function val(id){ var el = document.getElementById(id); return el ? el.value : ""; }
@@ -1463,7 +1468,7 @@ document.addEventListener("click", function(e){
     case "tx": openSheet("tx", {id:id}); break;
     case "del-tx": snap(); S.tx = S.tx.filter(function(t){ return t.id !== id; }); closeSheet(); save(); toast("Entry deleted.", true); break;
     case "close-view": openSheet("close-view"); break;
-    case "close-ok": S.close.seen = true; closeSheet(); save(); break;
+    case "close-ok": S.close.seen = true; S.close.snapshot = null; closeSheet(); save(); break;
     case "close-undo": { var keep = S.close.snapshot; S = normalise(JSON.parse(keep)); S.monthKey = cyc(); S.close = null; closeSheet(); save(); toast("Month close undone. Leftovers stay where they were."); break; }
     case "backup": openSheet("backup"); break;
     case "copy-backup": { var ta = document.getElementById("bk-text"), txt = ta.value;

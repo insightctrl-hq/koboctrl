@@ -251,7 +251,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "1.1.1";
+var VERSION = "1.2";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -777,7 +777,7 @@ var THEME_KEY = "koboctrl-theme", theme = (function(){ try { return localStorage
 function applyTheme(){ if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark"); else document.documentElement.removeAttribute("data-theme"); var m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute("content", theme === "dark" ? "#0A100D" : "#F3F5F4"); }
 function render(){
   var scr = S.setupDone ? V.tab : "s" + V.setup.step; if (scr !== V.scr){ V.scr = scr; window.scrollTo(0, 0); }
-  if (!S.setupDone){ $("#app").innerHTML = renderSetup(); wireSlides(); fmtInputs(); wireSetup(); focusFirst(); return; }
+  if (!S.setupDone){ $("#app").innerHTML = renderSetup() + (V.toast ? '<div class="toast" role="status">' + h(V.toast.msg) + '</div>' : ''); wireSlides(); fmtInputs(); wireSetup(); focusFirst(); return; }
   var body = V.tab === "spend" ? renderSpend() : V.tab === "goals" ? renderGoals() : V.tab === "progress" ? renderProgress() : V.tab === "settings" ? renderSettings() : renderPlan();
   var tabs = [["plan","Plan"],["spend","Spend"],["goals","Goals"],["progress","Progress"],["settings","Settings"]].map(function(t){
     return '<button class="tab" data-act="tab" data-v="' + t[0] + '"' + (V.tab === t[0] ? ' aria-current="page"' : '') + '>' + IC[t[0]] + '<span>' + t[1] + '</span></button>'; }).join("");
@@ -989,7 +989,7 @@ function renderSettings(){
   html += '<section class="card group"><div class="group-head"><span class="label">Accounts</span><button class="link" data-act="edit-account" data-id="">Add</button></div>' +
     S.accounts.map(function(a){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-account" data-id="' + a.id + '"><span><b style="font-weight:600">' + h(a.name) + '</b><br><span class="small muted">' + roleLabel(a.role) + (a.role === "save" ? ' · pots hold ' + naira(envelopeHeld(a)) : '') + '</span>' + (a.role === "save" && Math.abs(acctBalance(a) - envelopeHeld(a)) >= 100 ? '<br><span class="small" style="color:var(--red)">' + (acctBalance(a) > envelopeHeld(a) ? naira(acctBalance(a) - envelopeHeld(a)) + ' more than your pots' : naira(envelopeHeld(a) - acctBalance(a)) + ' less than your pots') + '</span>' : '') + '</span><span class="num" style="font-size:19px">' + naira(acctBalance(a)) + '</span></button>'; }).join("") + '</section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Appearance</div><div class="seg" role="group" aria-label="Appearance"><button data-act="set-theme" data-v="light" aria-pressed="' + (theme === "light") + '">Light</button><button data-act="set-theme" data-v="dark" aria-pressed="' + (theme === "dark") + '">Dark</button></div></section>';
-  html += '<section class="card"><div class="label" style="margin-bottom:10px">Feedback</div><button class="btn primary" data-act="sheet" data-v="feedback">Send feedback</button></section>';
+  html += '<section class="card"><div class="label" style="margin-bottom:10px">Feedback and privacy</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="sheet" data-v="feedback">Send feedback</button><button class="btn ghost" data-act="sheet" data-v="privacy">Privacy</button></div></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Your data</div><p class="small muted">Everything stays on this phone. Back up every week, and before changing phones.</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="backup">Back up</button><button class="btn ghost" data-act="sheet" data-v="restore">Restore</button></div>' +
     (S.close ? '<div class="kv" style="margin-top:14px"><span>Last month closed</span><span>' + h(monthName(S.close.month)) + '</span></div>' : '') + '</section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">How it works</div><p class="small muted">Money that arrives waits until you split it. The split fills your budgets in order, from daily needs down to savings with fixed dates. Save first comes out before anything else. What is left goes to your goals, one at a time in queue order, then to Leftovers.</p><p class="small muted">Each Monday, move the week’s spending money to your spending account. Each Friday, enter what your accounts really hold, so nothing slips through. When a new cycle starts on payday (or on the 1st, with no payday set), money left in spending budgets moves to your goals, then Leftovers. Refill money stays until you buy the item. Savings pots keep their balance.</p><p class="small muted">Going over a day or week budget is never fined. The extra simply comes off the next day or week.</p><p class="small muted">KoboCTRL never holds your money. To truly protect savings, lock them in your savings app. Taking money out of a goal here starts a short countdown, so you can think first.</p></section>';
@@ -1230,11 +1230,25 @@ function renderSheet(){
     return sheetWrap(closeLabel() + " closed", '<div class="card" style="padding:4px 16px">' + S.close.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div>' + (S.close.earlier || []).map(function(e){ return '<div class="label" style="margin:14px 0 6px">' + h(e.label) + '</div><div class="card" style="padding:4px 16px">' + e.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div>'; }).join("") + '<p class="small muted" style="margin-top:12px">Spending leftovers move to ' + h(sweepTarget() ? sweepTarget().name : "savings") + '. Savings pots keep their balance. Unpaid bills carry over.</p><div style="display:flex;gap:10px;margin-top:14px"><button class="btn primary" style="flex:1" data-act="close-ok">Got it</button>' + (S.close.snapshot ? '<button class="btn ghost" data-act="close-undo">Undo</button>' : '') + '</div>');
   }
   if (s.type === "backup"){
-    var txt = backupText();
-    return sheetWrap("Back up", '<p class="muted">Copy this and keep it somewhere safe, such as an email to yourself or your notes. To restore, paste it into Restore.</p><textarea class="t" id="bk-text" readonly>' + h(txt) + '</textarea><div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap"><button class="btn primary" data-act="copy-backup">Copy</button><button class="btn ghost" data-act="download-backup">Save as file</button></div>');
+    var txt = x.locked || backupText();
+    return sheetWrap("Back up", '<p class="muted">Copy this and keep it somewhere safe, such as an email to yourself or your notes. To restore, paste it into Restore. Anyone who has this text can read your money record, so lock it with a passphrase first.</p>' +
+      (x.locked ? '<p class="small" style="color:var(--blue);font-weight:700">Locked with your passphrase. It cannot be recovered if you forget it.</p>' : '<label class="f" for="bk-pass">Passphrase</label><input class="t" id="bk-pass" type="password" autocomplete="new-password" placeholder="At least 8 characters"><button class="btn ghost block" style="margin-top:10px" data-act="lock-backup">Lock with passphrase</button>') +
+      '<textarea class="t" id="bk-text" readonly style="margin-top:12px">' + h(txt) + '</textarea><div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap"><button class="btn primary" data-act="copy-backup">Copy</button><button class="btn ghost" data-act="download-backup">Save as file</button></div>');
+  }
+  if (s.type === "privacy"){
+    var pv = [
+      ["Who runs it", "KoboCTRL is made by InsightCTRL. Contact: insightctrl@gmail.com."],
+      ["What stays on this phone", "Your plan, apps, balances and entries are stored only in this browser on this phone. InsightCTRL has no server for this app and never receives them."],
+      ["What leaves the phone", "Only what you choose to send: backups you copy or save, and feedback emails. Feedback includes usage counts only if you tick the box, never amounts or names. InsightCTRL keeps feedback emails for up to 12 months to improve the app, then deletes them."],
+      ["Hosting", "The app is served by GitHub Pages. GitHub may record your IP address and device details when the page loads, under GitHub's own privacy statement."],
+      ["No tracking", "No ads, analytics, cookies or outside scripts."],
+      ["Your rights", "Back up shows everything held. Save as file lets you take it elsewhere. You can edit any entry, and Clear everything deletes it all. For feedback you emailed, write to insightctrl@gmail.com to see, correct or delete it. You can complain to the Nigeria Data Protection Commission at ndpc.gov.ng."],
+      ["Keep it safe", "Anyone who can open this phone's browser can see your plan, so use a screen lock. Lock backups with a passphrase before you send them anywhere."]
+    ];
+    return sheetWrap("Privacy", pv.map(function(r){ return '<div style="margin-top:14px"><b>' + h(r[0]) + '</b><p class="small muted" style="margin:4px 0 0">' + h(r[1]) + '</p></div>'; }).join("") + '<p class="small muted" style="margin-top:18px">Updated 29 October 2026.</p>');
   }
   if (s.type === "restore"){
-    return sheetWrap("Restore", '<p class="muted">Paste a backup. It replaces everything on this phone.</p><textarea class="t" id="rs-text" placeholder="Paste here" data-autofocus></textarea><div style="margin-top:14px"><button class="btn primary block" data-act="do-restore">Restore</button></div>', {cancel:"Cancel"});
+    return sheetWrap("Restore", '<p class="muted">Paste a backup. It replaces everything on this phone.</p><textarea class="t" id="rs-text" placeholder="Paste here" data-autofocus></textarea><label class="f" for="rs-pass">Passphrase, if the backup is locked</label><input class="t" id="rs-pass" type="password" autocomplete="current-password"><div style="margin-top:14px"><button class="btn primary block" data-act="do-restore">Restore</button></div>', {cancel:"Cancel"});
   }
   if (s.type === "clear"){
     return sheetWrap("Clear everything?", '<p class="muted">This deletes every budget and entry on this phone. Back up first if you might need them.</p><button class="btn danger block" data-act="do-clear">Clear everything</button>', {cancel:"Cancel"});
@@ -1355,7 +1369,7 @@ function renderSetup(){
   var st = V.setup.step, s = STEPS[st], body = '';
   if (s.k === "brand"){
     return '<div class="brand">' + doodleField(13, 1) + '<div class="inner">' + mark() + '<div class="powered">Powered by InsightCTRL</div><div class="tag">Every kobo has a job.</div><p class="lede">Make every payment last.</p>' +
-      '<button class="btn primary block" data-act="setup-next">Next</button><div style="text-align:center;margin-top:10px"><button class="link" data-act="sheet" data-v="restore">I have a backup</button></div></div></div>' + (V.sheet ? renderSheet() : '');
+      '<button class="btn primary block" data-act="setup-next">Next</button><div style="text-align:center;margin-top:10px"><button class="link" data-act="sheet" data-v="restore">I have a backup</button> · <button class="link" data-act="sheet" data-v="privacy">Privacy</button></div></div></div>' + (V.sheet ? renderSheet() : '');
   }
   if (s.k === "intro"){
     var slides = INTRO.map(function(c, i){ return '<section class="slide" aria-label="' + (i + 1) + ' of ' + INTRO.length + '"><div class="art">' + doodleField(15, i + 2) + c.art + '</div><h2>' + h(c.t) + '</h2><p>' + h(c.b) + '</p></section>'; }).join("");
@@ -1447,6 +1461,23 @@ function monthsUntilFrom(k){ return monthsUntil(k); }
 var undoState = null;
 function toast(msg, undo){ V.toast = {msg:msg, undo:!!undo}; clearTimeout(toast.t); toast.t = setTimeout(function(){ V.toast = null; undoState = null; render(); }, undo ? 6000 : 2600); }
 function snap(){ undoState = JSON.stringify(S); }
+function b64(buf){ var a = new Uint8Array(buf), out = ""; for (var i = 0; i < a.length; i++) out += String.fromCharCode(a[i]); return btoa(out); }
+function unb64(t){ var r = atob(t), a = new Uint8Array(r.length); for (var i = 0; i < r.length; i++) a[i] = r.charCodeAt(i); return a; }
+/* A locked backup uses AES-GCM with a key made from the passphrase (PBKDF2, SHA-256, 310,000 rounds). */
+function bkKey(pass, salt){ return crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]).then(function(k){ return crypto.subtle.deriveKey({name:"PBKDF2", salt:salt, iterations:310000, hash:"SHA-256"}, k, {name:"AES-GCM", length:256}, false, ["encrypt", "decrypt"]); }); }
+function lockBackup(txt, pass){ var salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  return bkKey(pass, salt).then(function(k){ return crypto.subtle.encrypt({name:"AES-GCM", iv:iv}, k, new TextEncoder().encode(txt)); }).then(function(ct){ return JSON.stringify({app:"KoboCTRL", enc:"v1", salt:b64(salt), iv:b64(iv), data:b64(ct)}); }); }
+function unlockBackup(o, pass){ return bkKey(pass, unb64(o.salt)).then(function(k){ return crypto.subtle.decrypt({name:"AES-GCM", iv:unb64(o.iv)}, k, unb64(o.data)); }).then(function(pt){ return new TextDecoder().decode(pt); }); }
+/* A pasted backup is checked before it replaces anything: lists must be lists and money must be numbers. */
+function cleanBackup(o){ if (!o || typeof o !== "object" || !Array.isArray(o.budgets) || !Array.isArray(o.tx) || (o.accounts != null && !Array.isArray(o.accounts))) return null;
+  function num(v){ var n = Number(v); return isFinite(n) ? n : 0; }
+  o.tx = o.tx.filter(function(t){ return t && typeof t === "object" && typeof t.type === "string"; }); o.tx.forEach(function(t){ t.amount = num(t.amount); if (t.note != null) t.note = String(t.note); });
+  o.budgets = o.budgets.filter(function(b){ return b && typeof b === "object" && b.id; }); o.budgets.forEach(function(b){ b.name = String(b.name || ""); b.amount = num(b.amount); if (b.target != null) b.target = num(b.target); if (b.start != null) b.start = num(b.start); });
+  if (o.accounts) o.accounts = o.accounts.filter(function(a){ return a && typeof a === "object" && a.id; }).map(function(a){ a.name = String(a.name || ""); a.start = num(a.start); return a; });
+  ["quick", "pending", "repay", "cycles"].forEach(function(k){ if (o[k] != null && !Array.isArray(o[k])) delete o[k]; });
+  return o; }
+function applyRestore(o){ var c = cleanBackup(o); if (!c){ toast("That does not look like a KoboCTRL backup."); return; }
+  snap(); S = normalise(c); S.setupDone = true; if (!S.monthKey) S.monthKey = cyc(); if (!S.started) S.started = today(); upgrade(); closeSheet(); V.tab = "plan"; save(); toast("Backup restored.", true); }
 function backupText(){ var o = JSON.parse(JSON.stringify(S)); if (o.close) o.close.snapshot = null; o.app = "KoboCTRL"; o.appVersion = VERSION; o.savedAt = new Date().toISOString(); return JSON.stringify(o); }
 function closeSheet(){ var bk = V.sheet && V.sheet.data && V.sheet.data.back; V.sheet = bk ? {type:bk, data:{}} : null; }
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
@@ -1628,8 +1659,13 @@ document.addEventListener("click", function(e){
       var done = function(){ S.lastBackup = Date.now(); save(); toast("Backup copied. Paste it somewhere safe."); render(); };
       try { navigator.clipboard.writeText(txt).then(done, function(){ ta.select(); toast("Select all and copy it."); render(); }); } catch(e2){ ta.select(); toast("Select all and copy it."); }
       return; }
-    case "download-backup": { try { var blob = new Blob([backupText()], {type:"application/json"}), aEl = document.createElement("a"); aEl.href = URL.createObjectURL(blob); aEl.download = "koboctrl-backup-" + today() + ".json"; document.body.appendChild(aEl); aEl.click(); aEl.remove(); S.lastBackup = Date.now(); save(); toast("Backup saved."); } catch(e3){ toast("Saving a file is blocked here. Use Copy."); } break; }
-    case "do-restore": { try { var o2 = JSON.parse(val("rs-text")); if (!o2 || !o2.budgets || !o2.tx) throw 0; snap(); S = normalise(o2); S.setupDone = true; if (!S.monthKey) S.monthKey = cyc(); if (!S.started) S.started = today(); upgrade(); closeSheet(); V.tab = "plan"; save(); toast("Backup restored.", true); } catch(e4){ toast("That does not look like a KoboCTRL backup."); } break; }
+    case "download-backup": { try { var blob = new Blob([(V.sheet && V.sheet.data && V.sheet.data.locked) || backupText()], {type:"application/json"}), aEl = document.createElement("a"); aEl.href = URL.createObjectURL(blob); aEl.download = "koboctrl-backup-" + today() + ".json"; document.body.appendChild(aEl); aEl.click(); aEl.remove(); S.lastBackup = Date.now(); save(); toast("Backup saved."); } catch(e3){ toast("Saving a file is blocked here. Use Copy."); } break; }
+    case "do-restore": { var o2 = null; try { o2 = JSON.parse(val("rs-text").trim()); } catch(e4){ o2 = null; }
+      if (o2 && o2.enc === "v1"){ var rp = val("rs-pass"); if (!rp){ toast("This backup is locked. Enter its passphrase."); break; }
+        unlockBackup(o2, rp).then(function(t){ applyRestore(JSON.parse(t)); render(); }, function(){ toast("Wrong passphrase, or the backup is damaged."); render(); }); break; }
+      applyRestore(o2); break; }
+    case "lock-backup": { var pw = val("bk-pass"); if (pw.length < 8){ toast("Use at least 8 characters."); break; }
+      lockBackup(backupText(), pw).then(function(t){ if (V.sheet && V.sheet.type === "backup") V.sheet.data.locked = t; toast("Locked. Now copy it or save it."); render(); }, function(){ toast("Locking is not available in this browser."); render(); }); break; }
     case "do-clear": snap(); S = freshState(); closeSheet(); save(); V.setup = {step:0, a:{}}; toast("Everything cleared.", true); break;
     case "undo": if (undoState){ S = normalise(JSON.parse(undoState)); undoState = null; save(); V.toast = null; toast("Undone."); } break;
     case "goal-add": readSetupStep(); break;

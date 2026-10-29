@@ -136,6 +136,7 @@ nav.tabbar .in-bar{max-width:560px;margin:0 auto;display:grid;grid-template-colu
 .sheet-head h2{font-family:var(--sans);font-size:24px;font-weight:800;letter-spacing:-.02em}
 .link{background:none;border:0;color:var(--blue);font-weight:600;cursor:pointer;padding:6px 0}
 .savewarn{position:sticky;top:0;z-index:60;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;background:var(--red);color:#fff;font-weight:600;font-size:14px}.savewarn button{background:#fff;color:var(--red);border:0;border-radius:999px;padding:6px 14px;font-weight:700;cursor:pointer}
+.nbtns{display:flex;flex-direction:column;gap:8px}.nbtns .btn{white-space:nowrap}
 .h1row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0 18px}.h1row h1{margin:0}
 .erow{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;padding:12px 0;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer;color:inherit;font:inherit}
 .scn{border:1.5px solid var(--gold,#C9A227);margin-bottom:14px}.scn-btns{display:flex;gap:8px;margin-top:12px}.scn-btns .btn{flex:1;padding-left:8px;padding-right:8px}
@@ -237,7 +238,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "0.6";
+var VERSION = "0.7";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -265,7 +266,7 @@ function round100(n){ return Math.ceil(n / 100) * 100; }
 /* ---------- State ---------- */
 var S, V = {tab:"plan", sheet:null, toast:null, setup:{step:0, a:{}}};
 function freshState(){ return {v:1, setupDone:false, accounts:[], budgets:[], tx:[], flags:{}, unlocks:[], repay:[], monthKey:mk(), close:null,
-  streak:{checked:today(), freezes:0, frozen:{}}, scoreWeeks:{}, quick:[], settings:{floorMonths:3, surcharge:5}, lastBackup:0, lastChange:0, source:"", nextMoney:"", income:null, fitSnooze:"", cool:{}, dismissed:{}, overHist:{}, raise:{}, topups:{}, payAnchor:""}; }
+  streak:{checked:today(), freezes:0, frozen:{}}, scoreWeeks:{}, quick:[], settings:{floorMonths:3, surcharge:5}, lastBackup:0, lastChange:0, source:"", nextMoney:"", income:null, fitSnooze:"", cool:{}, dismissed:{}, overHist:{}, raise:{}, topups:{}, pending:[], payAnchor:""}; }
 /* Plain names for the groups and pots that older versions created. */
 var GROUP_RENAME = {"Essentials":"Daily needs", "Buffer":"Cushion", "Commitments":"Giving and family"}, NAME_RENAME = {"Emergency floor":"Emergency money", "Runway":"Leftovers", "Buffer":"Cushion"};
 function migrate(x){ (x.budgets || []).forEach(function(b){ if (GROUP_RENAME[b.group]) b.group = GROUP_RENAME[b.group]; if (NAME_RENAME[b.name]) b.name = NAME_RENAME[b.name]; delete b.business;
@@ -579,7 +580,7 @@ function monthNoBreak(){ var m = mk(); if (!firstLogDay() || firstLogDay().slice
 /* ---------- Cycle close (automatic) ---------- */
 function monthClose(){
   var cur = cyc(); if (S.monthKey === cur) return false;
-  var prev = S.monthKey, prevEnd = cycEnd(prev), prevClose = S.close, snapshot = (S.close = null, JSON.stringify(S)), st = sweepTarget(), rp = rewardPot(), swept = 0, carriedBills = 0, lines = [];
+  var sweptBy = {}, prev = S.monthKey, prevEnd = cycEnd(prev), prevClose = S.close, snapshot = (S.close = null, JSON.stringify(S)), st = sweepTarget(), rp = rewardPot(), swept = 0, carriedBills = 0, lines = [];
   var weeks = Object.keys(S.scoreWeeks).filter(function(w){ return w >= prev && w <= prevEnd; }), avg = weeks.length ? weeks.reduce(function(a, w){ return a + S.scoreWeeks[w]; }, 0) / weeks.length : 0;
   S.overHist = S.overHist || {}; S.raise = S.raise || {};
   S.budgets.forEach(function(b){
@@ -591,15 +592,16 @@ function monthClose(){
           if (sug > b.amount){ S.raise[b.id] = sug; lines.push(b.name + " went over two cycles running."); } } }
       else S.overHist[b.id] = 0; }
     if (b.kind === "bill"){ if (left > 0){ S.tx.push({id:uid(), type:"alloc", budgetId:b.id, amount:left, month:cur, date:today(), carry:true}); carriedBills += left; } return; }
-    if (left > 0 && st){ S.tx.push({id:uid(), type:"sweep", from:b.id, amount:left, month:prev, date:today()}); swept += left; }
+    if (left > 0 && st){ S.tx.push({id:uid(), type:"sweep", from:b.id, amount:left, month:prev, date:today()}); swept += left; sweptBy[b.account] = (sweptBy[b.account] || 0) + left; }
   });
   S.budgets.forEach(function(b){ if (b.revert && b.revert.key !== cur){ if (b.period !== b.revert.period) b.carryFrom = today(); b.amount = b.revert.amount; b.period = b.revert.period; b.every = b.revert.every; delete b.revert; lines.push(b.name + " is back to its usual amount."); } });
   if (swept > 0 && st){
     var toReward = rp && avg >= 80 ? Math.round(swept * 0.2 / 100) * 100 : 0;
-    if (toReward > 0) S.tx.push({id:uid(), type:"sweepIn", budgetId:rp.id, amount:toReward, date:today()});
+    function route(tb, amt){ Object.keys(sweptBy).forEach(function(ac){ if (amt <= 0) return; var take = Math.min(amt, sweptBy[ac]); sweptBy[ac] -= take; amt -= take; queueMove(ac, tb.account, take, "Cycle leftovers"); }); }
+    if (toReward > 0){ S.tx.push({id:uid(), type:"sweepIn", budgetId:rp.id, amount:toReward, date:today()}); route(rp, toReward); }
     var fg2 = fillGoals(swept - toReward);
-    fg2.lines.forEach(function(l){ S.tx.push({id:uid(), type:"sweepIn", budgetId:l.id, amount:l.amount, date:today()}); lines.push(naira(l.amount) + " of leftovers moved to " + B(l.id).name + "."); });
-    if (fg2.left > 0){ S.tx.push({id:uid(), type:"sweepIn", budgetId:st.id, amount:fg2.left, date:today()}); lines.push(naira(fg2.left) + " of leftovers moved to " + st.name + "."); }
+    fg2.lines.forEach(function(l){ S.tx.push({id:uid(), type:"sweepIn", budgetId:l.id, amount:l.amount, date:today()}); route(B(l.id), l.amount); lines.push(naira(l.amount) + " of leftovers moved to " + B(l.id).name + "."); });
+    if (fg2.left > 0){ S.tx.push({id:uid(), type:"sweepIn", budgetId:st.id, amount:fg2.left, date:today()}); route(st, fg2.left); lines.push(naira(fg2.left) + " of leftovers moved to " + st.name + "."); }
     if (toReward > 0) lines.push(naira(toReward) + " unlocked for your reward budget, for a strong cycle.");
   }
   if (carriedBills > 0) lines.push(naira(carriedBills) + " of unpaid bills carried into this cycle.");
@@ -663,6 +665,27 @@ function fitSummary(bs, income, src, actions){
   return html; }
 function applyFit(bs, income){ fitPlan(bs, income).forEach(function(c){ for (var i = 0; i < bs.length; i++) if (bs[i].id === c.id){ if (c.sf) bs[i].pct = c.to; else if (c.to) bs[i].amount = c.to; else bs[i].paused = true; } }); }
 
+/* ---------- Transfers between accounts ---------- */
+/* Money moves between budgets in different accounts need a real transfer. They wait here until the person confirms them. */
+function queueMove(from, to, amount, reason){ amount = Math.round(amount || 0); if (!from || !to || from === to || amount < 100) return;
+  for (var i = 0; i < S.pending.length; i++){ var q = S.pending[i]; if (q.from === from && q.to === to && q.reason === reason){ q.amount += amount; q.snooze = ""; return; } }
+  S.pending.push({id:uid(), from:from, to:to, amount:amount, reason:reason, date:today()}); }
+/* Moves money between two budgets and queues the matching transfer when their accounts differ. */
+function budgetMove(fromB, toB, amount, month){ if (amount <= 0) return; queueMove(fromB.account, toB.account, amount, "Leftovers and covers"); }
+/* Money that must stay in an account: refill items and the reward pot. */
+function acctFloor(a){ var t = 0; S.budgets.forEach(function(b){ if (b.retired || b.account !== a.id) return; if (b.kind === "refill") t += Math.max(0, refillBal(b)); else if (b.reward) t += Math.max(0, potBalance(b)); }); return t; }
+/* What a savings account should hold, judged by the pots and refill items that live in it. Pending transfers count as already made. Spending budgets are left out, because their money waits in the income account until each weekly transfer. */
+function envelopeHeld(a){ var t = 0;
+  S.budgets.forEach(function(b){ if (b.retired || b.account !== a.id) return; if (isPot(b)) t += potBalance(b); else if (b.kind === "refill") t += Math.max(0, refillBal(b)); });
+  S.pending.forEach(function(q){ if (q.to === a.id) t -= q.amount; if (q.from === a.id) t += q.amount; });
+  return t; }
+/* Spending money still needed in the spending account from today to the end of the week. */
+function spendTopUp(){ var sp = acctByRole("spend"), need = 0, dl = bwDaysLeft();
+  S.budgets.forEach(function(b){ if (b.kind !== "spend" || b.paused || b.retired || b.account !== sp.id) return; var v = budgetView(b), leftC = Math.max(0, v.leftMonth), add;
+    if (b.period === "day") add = Math.max(0, v.left) + b.amount * Math.max(0, dl - 1); else if (b.period === "week") add = Math.max(0, v.left); else add = round100(b.amount * dl / cycDays(cyc()));
+    need += Math.min(add, leftC); });
+  return Math.max(0, round100(need - Math.max(0, acctBalance(sp) - acctFloor(sp)))); }
+
 /* ---------- Up next ---------- */
 function openingAmount(){ var t = 0, fl = S.budgets.filter(function(b){ return b.kind === "floor"; })[0]; S.accounts.forEach(function(a){ t += a.start || 0; }); return Math.max(0, t - (fl ? fl.start || 0 : 0)); }
 function upNext(){
@@ -685,6 +708,8 @@ function upNext(){
   if (!S.tx.some(function(t){ return t.type === "in"; })){ var op = openingAmount();
     items.push(op > 0 ? {t:"Split the " + naira(op) + " you have now", s:"KoboCTRL shares it across your plan.", act:"opening", btn:"Split", alert:true} : {t:"Add the money you have now", s:"KoboCTRL shares it across your plan.", act:"log-in", btn:"Add", alert:true}); }
   if (ta > 0) items.push({t:naira(ta) + " waiting to be split", s:"Split it across your plan before you spend it.", act:"split", btn:"Split", alert:true});
+  S.pending.forEach(function(q){ if (q.snooze === today() || !A(q.from) || !A(q.to)) return; items.push({t:"Move " + naira(q.amount) + " from " + A(q.from).name + " to " + A(q.to).name, s:q.reason + ". Tap Done once you have made the transfer.", act:"pend-done", id:q.id, btn:"Done", act2:"pend-snooze", btn2:"Not yet", alert:true}); });
+  S.accounts.forEach(function(a){ var fl = acctFloor(a); if (fl > 0 && acctBalance(a) < fl && !S.pending.some(function(q){ return q.to === a.id; })) items.push({t:a.name + " is short by " + naira(fl - acctBalance(a)), s:"Refill and reward money is kept there, so it should hold at least " + naira(fl) + ".", act:"floor-fix", id:a.id, btn:"Move it", alert:true}); });
   S.repay.forEach(function(r){ if (r.paid < r.total){ var b = B(r.budgetId); items.push({t:"Repay " + (b ? b.name : "pot"), s:naira(Math.min(r.weekly, r.total - r.paid)) + " this week, " + naira(r.total - r.paid) + " left in total.", act:"repay", id:r.id, btn:"Pay", alert:true}); } });
   S.unlocks.forEach(function(u){ var b = B(u.budgetId); if (!b) return; var ready = Date.now() - u.at >= 864e5;
     items.push({t:(ready ? "Unlock ready: " : "Unlocking: ") + b.name, s:ready ? "You can withdraw now, or cancel and keep it locked." : "Ready in " + Math.ceil((864e5 - (Date.now() - u.at)) / 36e5) + " hours. You can still cancel.", act:"unlock-view", id:u.id, btn:ready ? "Open" : "Cancel"}); });
@@ -749,6 +774,7 @@ document.addEventListener("input", function(e){ var el = e.target; if (!isAmount
   try { el.setSelectionRange(p, p); } catch(err){} });
 function focusFirst(){ var el = document.querySelector("[data-autofocus]"); if (el) try { el.focus({preventScroll:true}); } catch(e){} }
 function pageTop(title, extra){ return '<header class="top">' + mark() + '</header>' + (extra ? '<div class="h1row"><h1>' + h(title) + '</h1>' + extra + '</div>' : '<h1>' + h(title) + '</h1>'); }
+function nextBtns(n){ return '<div class="nbtns"><button class="btn primary" data-act="' + n.act + '"' + (n.id ? ' data-id="' + n.id + '"' : "") + ">" + n.btn + "</button>" + (n.btn2 ? '<button class="btn ghost" data-act="' + n.act2 + '"' + (n.id ? ' data-id="' + n.id + '"' : "") + ">" + n.btn2 + "</button>" : "") + "</div>"; }
 function scnBanner(){ var w = V.scenario.was, pl = planMonthly(S.budgets), sp = spareMonthly();
   function was(a, b){ return a !== b ? ' <s class="muted">' + naira(b) + '</s>' : ''; }
   return '<section class="card scn" aria-label="Scenario"><b>Trying a scenario</b><p class="small muted" style="margin:4px 0 8px">Nothing is saved until you apply it.</p><div class="kv"><span>Plan each month</span><span>' + naira(pl) + was(pl, w.plan) + '</span></div>' +
@@ -766,7 +792,7 @@ function renderPlan(){
   var safe = safeToday(), items = upNext(), html = pageTop("Plan", '<button class="link" data-act="sheet" data-v="edit-plan">Edit</button>');
   html += '<div class="stack"><section class="card hero" aria-label="Safe to spend today"><div class="label">Safe to spend today</div><div class="big num">' + naira(safe) + '</div>' + coveredHtml() + '</section>';
   var n = items[0];
-  if (n) html += '<section class="card next' + (n.alert ? ' alert' : '') + '" aria-label="Up next"><div class="txt"><div class="label" style="margin-bottom:4px">Up next' + (items.length > 1 ? ' · 1 of ' + items.length : '') + '</div><b>' + h(n.t) + '</b><span>' + h(n.s) + '</span></div><button class="btn primary" data-act="' + n.act + '"' + (n.id ? ' data-id="' + n.id + '"' : '') + '>' + n.btn + '</button></section>';
+  if (n) html += '<section class="card next' + (n.alert ? ' alert' : '') + '" aria-label="Up next"><div class="txt"><div class="label" style="margin-bottom:4px">Up next' + (items.length > 1 ? ' · 1 of ' + items.length : '') + '</div><b>' + h(n.t) + '</b><span>' + h(n.s) + '</span></div>' + nextBtns(n) + '</section>';
   if (items.length > 1) html += '<button class="link" data-act="sheet" data-v="all-next">See all ' + items.length + '</button>';
   var sec = {day:[], week:[], month:[], save:[]};
   S.budgets.forEach(function(b){ if (b.retired || isGoal(b) || ((b.reward || b.sweep) && !potBalance(b))) return;
@@ -891,7 +917,7 @@ function renderSettings(){
   html += '<div class="stack"><section class="card group"><div class="group-head"><span class="label">Budgets</span><button class="link" data-act="edit-budget" data-id="">Add</button></div>' +
     S.budgets.filter(function(b){ return !b.retired; }).map(function(b){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-simple" data-id="' + b.id + '"><span><b style="font-weight:600">' + h(b.name) + '</b><br><span class="small muted">' + h(b.group) + ' · ' + kindLabel(b) + '</span></span><span class="num" style="font-size:19px">' + naira(b.amount) + '</span></button>'; }).join("") + '</section>';
   html += '<section class="card group"><div class="group-head"><span class="label">Accounts</span><button class="link" data-act="edit-account" data-id="">Add</button></div>' +
-    S.accounts.map(function(a){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-account" data-id="' + a.id + '"><span><b style="font-weight:600">' + h(a.name) + '</b><br><span class="small muted">' + roleLabel(a.role) + '</span></span><span class="num" style="font-size:19px">' + naira(acctBalance(a)) + '</span></button>'; }).join("") + '</section>';
+    S.accounts.map(function(a){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-account" data-id="' + a.id + '"><span><b style="font-weight:600">' + h(a.name) + '</b><br><span class="small muted">' + roleLabel(a.role) + (a.role === "save" ? ' · pots hold ' + naira(envelopeHeld(a)) : '') + '</span>' + (a.role === "save" && Math.abs(acctBalance(a) - envelopeHeld(a)) >= 100 ? '<br><span class="small" style="color:var(--red)">' + (acctBalance(a) > envelopeHeld(a) ? naira(acctBalance(a) - envelopeHeld(a)) + ' more than your pots' : naira(envelopeHeld(a) - acctBalance(a)) + ' less than your pots') + '</span>' : '') + '</span><span class="num" style="font-size:19px">' + naira(acctBalance(a)) + '</span></button>'; }).join("") + '</section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Appearance</div><div class="seg" role="group" aria-label="Appearance"><button data-act="set-theme" data-v="light" aria-pressed="' + (theme === "light") + '">Light</button><button data-act="set-theme" data-v="dark" aria-pressed="' + (theme === "dark") + '">Dark</button></div></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Your data</div><p class="small muted">Everything stays on this phone. Back up every week, and before changing phones.</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="backup">Back up</button><button class="btn ghost" data-act="sheet" data-v="restore">Restore</button></div>' +
     (S.close ? '<div class="kv" style="margin-top:14px"><span>Last month closed</span><span>' + h(monthName(S.close.month)) + '</span></div>' : '') + '</section>';
@@ -908,6 +934,15 @@ function sheetWrap(title, inner, opts){ opts = opts || {};
   return '<div class="scrim" data-act="close-sheet"><div class="sheet" role="dialog" aria-modal="true" aria-label="' + h(title) + '" data-stop="1"><div class="grab"></div><div class="sheet-head"><h2>' + h(title) + '</h2><button class="link" data-act="close-sheet">' + (opts.cancel || "Close") + '</button></div>' + inner + '</div></div>'; }
 function budgetOptions(sel, kinds){ return S.budgets.filter(function(b){ return kinds.indexOf(b.kind) >= 0 && !b.paused && !b.retired; }).map(function(b){ return '<option value="' + b.id + '"' + (b.id === sel ? ' selected' : '') + '>' + h(b.name) + '</option>'; }).join(""); }
 function potOptions(sel){ var l = S.budgets.filter(function(b){ return isPot(b) && !b.retired && potBalance(b) > 0; }); if (!l.length) return ""; return '<optgroup label="From savings">' + l.map(function(b){ return '<option value="' + b.id + '"' + (b.id === sel ? " selected" : "") + ">" + h(b.name) + " (" + naira(potBalance(b)) + ")</option>"; }).join("") + "</optgroup>"; }
+/* Pairs a shortfall in one account with a matching surplus in another, which is usually a transfer the app did not know about. */
+function checkPairs(diffs){ var neg = diffs.filter(function(d){ return d.diff < 0; }), pos = diffs.filter(function(d){ return d.diff > 0; }), out = [], used = {};
+  neg.forEach(function(n){ for (var i = 0; i < pos.length; i++){ var q = pos[i]; if (used[q.acct]) continue; var a = -n.diff, b = q.diff; if (Math.abs(a - b) <= Math.max(200, Math.min(a, b) * 0.02)){ used[q.acct] = 1; out.push({from:n.acct, to:q.acct, amount:Math.min(a, b), off:false}); break; } } });
+  return out; }
+function checkRemaining(x){ var d = x.diffs.map(function(z){ return {acct:z.acct, diff:z.diff, exp:z.exp}; });
+  (x.pairs || []).forEach(function(pr){ if (pr.off) return; d.forEach(function(z){ if (z.acct === pr.from) z.diff += pr.amount; if (z.acct === pr.to) z.diff -= pr.amount; }); });
+  return d.filter(function(z){ return Math.abs(z.diff) >= 100; }); }
+document.addEventListener("change", function(e){ var el = e.target; if (!el.classList || !el.classList.contains("cr-mode")) return; var i = el.getAttribute("data-i"), m = el.value;
+  Array.prototype.forEach.call(document.querySelectorAll('.cr-b[data-i="' + i + '"]'), function(n){ n.style.display = m === "spend" ? "" : "none"; }); Array.prototype.forEach.call(document.querySelectorAll('.cr-a[data-i="' + i + '"]'), function(n){ n.style.display = m === "move" ? "" : "none"; }); });
 function acctOptions(sel){ return S.accounts.map(function(a){ return '<option value="' + a.id + '"' + (a.id === sel ? ' selected' : '') + '>' + h(a.name) + '</option>'; }).join(""); }
 function renderSheet(){
   var s = V.sheet, x = s.data || {};
@@ -934,7 +969,7 @@ function renderSheet(){
     var inner2 = '<p class="muted">' + naira(amt) + ' waiting. Save first comes out first, then your plan in order. What is left goes to your goals, then ' + h(sweepTarget() ? sweepTarget().name : "savings") + '.</p><div class="card split" style="padding:4px 16px;margin:12px 0">' +
       mergeLines(lines).map(function(l){ var b = B(l.id); return '<div class="kv"><span>' + h(b ? b.name : "?") + '</span><span class="num" style="font-size:19px">' + naira(l.amount) + '</span></div>'; }).join("") + '</div>';
     if (moves.length) inner2 += '<div class="label" style="margin:16px 0 8px">Transfers to make</div><div class="note">' + moves.map(function(m){ return 'Move <b>' + naira(m.amount) + '</b> from ' + h(A(m.from).name) + ' to ' + h(A(m.to).name) + '.'; }).join("<br>") + '</div>' +
-      '<label class="check"><input type="checkbox" id="f-moved"' + (x.opening ? '' : ' checked') + '> I have made these transfers</label>';
+      '<p class="small muted" style="margin-top:8px">They appear in Up next. Tap Done there once each one is made.</p>';
     inner2 += '<div style="margin-top:18px"><button class="btn primary block" data-act="confirm-split"' + (total <= 0 ? ' disabled' : '') + '>Confirm split</button></div>';
     return sheetWrap("Split " + naira(amt), inner2, {cancel:"Later"});
   }
@@ -988,10 +1023,15 @@ function renderSheet(){
     return sheetWrap("Balance check", inner4, {cancel:"Cancel"});
   }
   if (s.type === "check-result"){
-    var inner5 = x.diffs.length ? x.diffs.map(function(d, i){
-      return '<div class="card" style="margin-bottom:10px"><b>' + h(A(d.acct).name) + '</b><p class="muted small" style="margin:4px 0 10px">' + (d.diff < 0 ? naira(-d.diff) + ' left this account without being logged. Which budget did it come from?' : naira(d.diff) + ' more than expected. It will be added to money waiting to be split.') + '</p>' +
-        (d.diff < 0 ? '<select class="t" id="cr-' + i + '">' + budgetOptions(null, ["spend","bill","refill"]) + '</select>' : '') + '</div>'; }).join("") : '<div class="card empty">Everything matches. Well done.</div>';
-    return sheetWrap("Check result", inner5 + '<div style="margin-top:14px"><button class="btn primary block" data-act="check-apply">Done</button></div>', {cancel:"Cancel"});
+    var rem3 = checkRemaining(x), body5 = '';
+    if (x.pairs.length) body5 += x.pairs.map(function(pr, i){ return '<div class="card" style="margin-bottom:10px"><b>' + (pr.off ? 'Not a transfer' : 'Looks like a transfer') + '</b><p class="muted small" style="margin:4px 0 10px">' + naira(pr.amount) + ' left ' + h(A(pr.from).name) + ' and arrived in ' + h(A(pr.to).name) + '.</p><button class="btn ' + (pr.off ? 'primary' : 'ghost') + '" data-act="pair-toggle" data-v="' + i + '">' + (pr.off ? 'Record it as a transfer' : 'It was not a transfer') + '</button></div>'; }).join("");
+    body5 += rem3.map(function(d, i){ var a = A(d.acct), neg = d.diff < 0, others = S.accounts.filter(function(z){ return z.id !== d.acct; });
+      return '<div class="card" style="margin-bottom:10px"><b>' + h(a.name) + '</b><p class="muted small" style="margin:4px 0 10px">' + (neg ? naira(-d.diff) + ' less than expected.' : naira(d.diff) + ' more than expected.') + (d.exp < 0 ? ' KoboCTRL expected less than ₦0 here, so a transfer was probably missed.' : '') + '</p>' +
+        '<label class="f" for="cr-m-' + i + '">What happened?</label><select class="t cr-mode" id="cr-m-' + i + '" data-i="' + i + '">' + (neg ? '<option value="spend">I spent it</option>' : '<option value="in">Money came in</option>') + (others.length ? '<option value="move"' + (d.exp < 0 ? ' selected' : '') + '>' + (neg ? 'I moved it to another account' : 'It came from another account') + '</option>' : '') + '<option value="adjust">KoboCTRL had the wrong balance</option></select>' +
+        (neg ? '<div class="cr-b" data-i="' + i + '"' + (d.exp < 0 ? ' style="display:none"' : '') + '><label class="f" for="cr-b-' + i + '">Which budget?</label><select class="t" id="cr-b-' + i + '">' + budgetOptions(null, ["spend","bill","refill"]) + potOptions(null) + '</select></div>' : '') +
+        (others.length ? '<div class="cr-a" data-i="' + i + '"' + (d.exp < 0 ? '' : ' style="display:none"') + '><label class="f" for="cr-a-' + i + '">' + (neg ? 'Which account?' : 'From which account?') + '</label><select class="t" id="cr-a-' + i + '">' + others.map(function(z){ return '<option value="' + z.id + '">' + h(z.name) + '</option>'; }).join("") + '</select></div>' : '') + '</div>'; }).join("");
+    if (!body5) body5 = '<div class="card empty">Everything matches. Well done.</div>';
+    return sheetWrap("Check result", (x.blank ? '<p class="small muted">Some accounts were left blank, so this check earns no points.</p>' : '') + body5 + '<div style="margin-top:14px"><button class="btn primary block" data-act="check-apply">Done</button></div>', {cancel:"Cancel"});
   }
   if (s.type === "edit-budget"){
     var pre = x.preset, eb = x.id ? B(x.id) : (x.newGoal || pre === "goal") ? {name:"", group:"Savings", kind:"pot", goal:true, amount:0, order:6, account:acctByRole("save").id}
@@ -1095,7 +1135,7 @@ function renderSheet(){
     return sheetWrap("Lasts until", body);
   }
   if (s.type === "all-next"){
-    return sheetWrap("Up next", upNext().map(function(n){ return '<div class="card next' + (n.alert ? ' alert' : '') + '" style="margin-bottom:10px"><div class="txt"><b>' + h(n.t) + '</b><span>' + h(n.s) + '</span></div><button class="btn primary" data-act="' + n.act + '"' + (n.id ? ' data-id="' + n.id + '"' : '') + '>' + n.btn + '</button></div>'; }).join(""));
+    return sheetWrap("Up next", upNext().map(function(n){ return '<div class="card next' + (n.alert ? ' alert' : '') + '" style="margin-bottom:10px"><div class="txt"><b>' + h(n.t) + '</b><span>' + h(n.s) + '</span></div>' + nextBtns(n) + '</div>'; }).join(""));
   }
   if (s.type === "close-view"){
     return sheetWrap(closeLabel() + " closed", '<div class="card" style="padding:4px 16px">' + S.close.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div><p class="small muted" style="margin-top:12px">Spending leftovers move to ' + h(sweepTarget() ? sweepTarget().name : "savings") + '. Savings pots keep their balance. Unpaid bills carry over.</p><div style="display:flex;gap:10px;margin-top:14px"><button class="btn primary" style="flex:1" data-act="close-ok">Got it</button>' + (S.close.snapshot ? '<button class="btn ghost" data-act="close-undo">Undo</button>' : '') + '</div>');
@@ -1331,7 +1371,7 @@ function closeSheet(){ var bk = V.sheet && V.sheet.data && V.sheet.data.back; V.
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
 function val(id){ var el = document.getElementById(id); return el ? el.value : ""; }
 
-var SCN_BLOCK = ["save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "unlock", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought"];
+var SCN_BLOCK = ["save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "unlock", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought", "pend-done", "floor-fix"];
 document.addEventListener("click", function(e){
   var el = e.target.closest("[data-act]"); if (!el) return;
   if (el.getAttribute("data-act") === "close-sheet" && e.target.closest("[data-stop]") && !e.target.closest("button")) return;
@@ -1368,6 +1408,9 @@ document.addEventListener("click", function(e){
     case "real-unlock": { var ru = B(id); snap(); ru.realLock = false; save(); toast(ru.name + " marked as not locked.", true); break; }
     case "make-flex": { var mf = B(id); if (!mf) break; snap(); mf.goal = true; mf.fixed = false; mf.amount = 0; mf.order = 6; mf.qpos = goalQueue().reduce(function(m, g){ return Math.max(m, g.qpos || 0); }, 100) + 1; save(); toast(mf.name + " is now a flexible goal.", true); break; }
     case "toggle-parent": V.open = V.open || {}; V.open[v] = !V.open[v]; break;
+    case "pend-done": { var pq = S.pending.filter(function(z){ return z.id === id; })[0]; if (!pq) break; snap(); S.tx.push({id:uid(), type:"move", from:pq.from, to:pq.to, amount:pq.amount, date:today()}); S.pending = S.pending.filter(function(z){ return z.id !== id; }); save(); toast("Transfer recorded.", true); break; }
+    case "pend-snooze": { var pz = S.pending.filter(function(z){ return z.id === id; })[0]; if (pz){ pz.snooze = today(); save(); } break; }
+    case "floor-fix": { var fa = A(id); if (!fa) break; queueMove(acctByRole("income").id === id ? acctByRole("save").id : acctByRole("income").id, id, acctFloor(fa) - acctBalance(fa), "Money set aside here"); save(); toast("Added to Up next."); break; }
     case "dismiss-rem": S.dismissed[id] = 1; save(); break;
     case "pay-ics": { try { var ib = new Blob([payIcs()], {type:"text/calendar"}), ia2 = document.createElement("a"); ia2.href = URL.createObjectURL(ib); ia2.download = "koboctrl-payday.ics"; document.body.appendChild(ia2); ia2.click(); ia2.remove(); S.icsDone = true; save(); toast("Open the file to add it to your calendar."); } catch(e6){ toast("Your browser blocked the file."); } break; }
     case "do-break": { var ob = B(id); if (!ob) break; var made = [], items2 = hhItems(S.source);
@@ -1375,7 +1418,7 @@ document.addEventListener("click", function(e){
       if (!made.length){ toast("Add at least one amount."); break; }
       snap(); var tot2 = made.reduce(function(a2, m2){ return a2 + m2[1]; }, 0), remF = Math.max(0, funded(ob) - spentMonth(ob)), given2 = 0;
       made.forEach(function(m2, i){ var nb = {id:uid(), created:today(), name:m2[0], group:ob.group, kind:"refill", period:"month", amount:m2[1], every:m2[2] || 1, order:ob.order, account:ob.account, parent:ob.name}; S.budgets.push(nb);
-        var share = i === made.length - 1 ? remF - given2 : Math.floor(remF * m2[1] / tot2 / 10) * 10; given2 += share; if (share > 0) S.tx.push({id:uid(), type:"cover", from:ob.id, to:nb.id, amount:share, month:cyc(), date:today()}); });
+        var share = i === made.length - 1 ? remF - given2 : Math.floor(remF * m2[1] / tot2 / 10) * 10; given2 += share; if (share > 0){ S.tx.push({id:uid(), type:"cover", from:ob.id, to:nb.id, amount:share, month:cyc(), date:today()}); queueMove(ob.account, nb.account, share, "Leftovers and covers"); } });
       ob.retired = true; ob.paused = true; ob.bundle = false; S.quick = S.quick.filter(function(q4){ return q4.budgetId !== ob.id; }); V.open = V.open || {}; V.open[ob.name] = true; closeSheet(); save(); toast(ob.name + " is now " + made.length + " items.", true); break; }
     case "quick": { var q = S.quick[+el.getAttribute("data-i")]; if (!q || !B(q.budgetId)) break; snap(); S.tx.push({id:uid(), type:"out", budgetId:q.budgetId, amount:q.amount, note:q.label, date:today(), at:Date.now()}); save();
       var qv = budgetView(B(q.budgetId)); toast(qv.over ? q.label + " logged. " + B(q.budgetId).name + " is now over." : q.label + " logged. " + naira(Math.max(0, qv.left)) + " left.", true); break; }
@@ -1403,20 +1446,27 @@ document.addEventListener("click", function(e){
     case "confirm-split": {
       var lines = proposeSplit(toAssign()), m = mk(); snap();
       lines.forEach(function(l){ S.tx.push({id:uid(), type:"alloc", budgetId:l.id, amount:l.amount, month:cyc(), date:today(), sf:!!l.sf}); });
-      var moved = document.getElementById("f-moved"); if (moved && moved.checked) splitMoves(lines).forEach(function(mv){ S.tx.push({id:uid(), type:"move", from:mv.from, to:mv.to, amount:mv.amount, date:today()}); });
+      splitMoves(lines).forEach(function(mv){ queueMove(mv.from, mv.to, mv.amount, "Your split"); });
+      if (!sameAcct() && (S.flags[weekStart()] || {}).transfer){ var tu = spendTopUp(); if (tu > 0) queueMove(acctByRole("income").id, acctByRole("spend").id, tu, "Spending until Sunday"); }
       closeSheet(); save(); toast("Every kobo has a job.", true); break; }
     case "budget": openSheet("budget", {id:id}); break;
     case "pay-bill": { var pb = B(id), pv = budgetView(pb), due = pb.amount - pv.paid; if (due <= 0) break; snap(); S.tx.push({id:uid(), type:"out", budgetId:pb.id, amount:due, note:pb.name, date:today(), at:Date.now()}); closeSheet(); save(); toast(pb.name + " marked paid.", true); break; }
     case "transfer": { var wa = weeklyAllowance(); snap(); if (wa > 0) S.tx.push({id:uid(), type:"move", from:acctByRole("income").id, to:acctByRole("spend").id, amount:wa, date:today()});
       S.flags[weekStart()] = Object.assign({}, S.flags[weekStart()], {transfer:true}); closeSheet(); save(); toast("Transfer recorded.", true); break; }
     case "check": openSheet("check"); break;
-    case "check-run": { var diffs = []; S.accounts.forEach(function(a){ var raw = val("cb-" + a.id); if (raw === "") return; var real = parseAmt(raw), exp = acctBalance(a), df = real - exp; if (Math.abs(df) >= 100) diffs.push({acct:a.id, diff:df}); });
-      openSheet("check-result", {diffs:diffs}); break; }
-    case "check-apply": { snap(); (V.sheet.data.diffs || []).forEach(function(dd, i){
-        if (dd.diff < 0) S.tx.push({id:uid(), type:"out", budgetId:val("cr-" + i), account:dd.acct, amount:-dd.diff, note:"Unlogged spending", unrecorded:true, date:today(), at:Date.now()});
-        else S.tx.push({id:uid(), type:"in", account:dd.acct, amount:dd.diff, note:"Found at balance check", date:today(), at:Date.now()}); });
-      S.flags[weekStart()] = Object.assign({}, S.flags[weekStart()], {check:true}); closeSheet(); save(); toast("Balance check done. +15 points.", true); break; }
-    case "cover": { var cb = B(id), cv = budgetView(cb), buf = bufferBudget(), over = cv.spent - cv.limit; snap(); S.tx.push({id:uid(), type:"cover", from:buf.id, to:cb.id, amount:over, month:cyc(), date:today()}); closeSheet(); save(); toast("Covered from " + buf.name + ".", true); break; }
+    case "check-run": { var diffs = [], blank = false;
+      S.accounts.forEach(function(a){ var raw = val("cb-" + a.id); if (raw === ""){ blank = true; return; } var real = parseAmt(raw), exp = acctBalance(a), df = real - exp; if (Math.abs(df) >= 100) diffs.push({acct:a.id, diff:df, exp:exp}); });
+      openSheet("check-result", {diffs:diffs, pairs:checkPairs(diffs), blank:blank}); break; }
+    case "pair-toggle": { var pr = V.sheet.data.pairs[+v]; pr.off = !pr.off; break; }
+    case "check-apply": { var cd = V.sheet.data; snap();
+      cd.pairs.forEach(function(pr){ if (!pr.off) S.tx.push({id:uid(), type:"move", from:pr.from, to:pr.to, amount:pr.amount, date:today()}); });
+      checkRemaining(cd).forEach(function(d, i){ var mode = val("cr-m-" + i) || "adjust", amt = Math.abs(d.diff), partner = val("cr-a-" + i);
+        if (mode === "spend"){ var sb2 = B(val("cr-b-" + i)); if (sb2 && isPot(sb2)) S.tx.push({id:uid(), type:"potSpend", budgetId:sb2.id, amount:amt, account:d.acct, note:"Unlogged spending", date:today(), at:Date.now()}); else S.tx.push({id:uid(), type:"out", budgetId:val("cr-b-" + i), account:d.acct, amount:amt, note:"Unlogged spending", unrecorded:true, date:today(), at:Date.now()}); }
+        else if (mode === "in") S.tx.push({id:uid(), type:"in", account:d.acct, amount:amt, note:"Found at balance check", date:today(), at:Date.now()});
+        else if (mode === "move" && partner && partner !== d.acct) S.tx.push({id:uid(), type:"move", from:d.diff < 0 ? d.acct : partner, to:d.diff < 0 ? partner : d.acct, amount:amt, date:today()});
+        else S.tx.push({id:uid(), type:"adjust", account:d.acct, amount:d.diff, note:"Balance corrected at check", date:today()}); });
+      var full = !cd.blank; if (full) S.flags[weekStart()] = Object.assign({}, S.flags[weekStart()], {check:true}); closeSheet(); save(); toast(full ? "Balance check done. +15 points." : "Checked. Fill in every account to earn the points.", true); break; }
+    case "cover": { var cb = B(id), cv = budgetView(cb), buf = bufferBudget(), over = cv.spent - cv.limit; snap(); S.tx.push({id:uid(), type:"cover", from:buf.id, to:cb.id, amount:over, month:cyc(), date:today()}); budgetMove(buf, cb, over); closeSheet(); save(); toast("Covered from " + buf.name + ".", true); break; }
     case "unlock": { if (S.unlocks.some(function(u){ return u.budgetId === id; })){ toast("Already unlocking."); break; } snap(); S.unlocks.push({id:uid(), budgetId:id, at:Date.now()}); closeSheet(); save(); toast("Unlock starts now. Ready in 24 hours.", true); break; }
     case "unlock-view": { var u = S.unlocks.filter(function(z){ return z.id === id; })[0]; if (!u) break;
       if (Date.now() - u.at >= 864e5){ openSheet("withdraw", {id:u.budgetId, lockBreak:true, unlockId:u.id}); }
@@ -1459,7 +1509,7 @@ document.addEventListener("click", function(e){
       var stA = sweepTarget(), leftA = isPot(ab) ? potBalance(ab) : ab.kind === "refill" ? Math.max(0, refillBal(ab)) : Math.max(0, funded(ab) - spentCyc(ab));
       if (isPot(ab) && leftA > 0){ toast("Take the money out of " + ab.name + " first."); break; }
       if (leftA > 0 && !stA){ toast("Move the money out of " + ab.name + " first."); break; }
-      snap(); if (leftA > 0){ S.tx.push({id:uid(), type:"sweep", from:ab.id, amount:leftA, month:cyc(), date:today()}); S.tx.push({id:uid(), type:"sweepIn", budgetId:stA.id, amount:leftA, date:today()}); }
+      snap(); if (leftA > 0){ S.tx.push({id:uid(), type:"sweep", from:ab.id, amount:leftA, month:cyc(), date:today()}); S.tx.push({id:uid(), type:"sweepIn", budgetId:stA.id, amount:leftA, date:today()}); queueMove(ab.account, stA.account, leftA, "Cycle leftovers"); }
       ab.retired = true; ab.paused = true; ab.archived = true; delete ab.revert; S.quick = S.quick.filter(function(q5){ return q5.budgetId !== id; }); if (S.topups) delete S.topups[id]; if (S.raise) delete S.raise[id];
       closeSheet(); save(); toast(ab.name + " archived. Its history stays.", true); break; }
     case "bought": { var bg = B(id); if (!bg) break; var left2 = potBalance(bg); snap();

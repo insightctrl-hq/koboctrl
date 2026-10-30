@@ -252,7 +252,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "1.4";
+var VERSION = "1.5";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -408,7 +408,7 @@ function periodLimit(b, key){
     var lim = Math.max(0, b.amount - debt), sp = spentIn(b, r[0], r[1]); debt = Math.max(0, sp - lim); }
   return Math.max(0, b.amount - debt);
 }
-function carried(b){ var r = periodKeys(b, today()); return b.amount - periodLimit(b, r[0]); }
+function carried(b){ if (b.kind !== "spend" || (b.period !== "day" && b.period !== "week")) return 0; return Math.max(0, b.amount - budgetView(b).limit); }
 function budgetView(b){
   var k = cyc(), fu = funded(b, k), spC = spentCyc(b, k), leftC = fu - spC, o = {b:b, funded:fu, need:cycNeed(b, k), leftMonth:leftC};
   if (b.kind === "refill"){ o.balance = refillBal(b); o.target = b.amount; o.left = o.balance; o.limit = b.amount; o.spent = spentIn(b, k, cycEnd(k)); o.over = false; o.ready = o.balance >= b.amount; return o; }
@@ -416,8 +416,10 @@ function budgetView(b){
   if (isPot(b)){ o.balance = potBalance(b); o.target = b.kind === "floor" ? floorTarget() : (b.target || 0); return o; }
   if (b.kind === "bill"){ o.paid = spC; o.due = b.dueDay; o.isPaid = spC >= b.amount; return o; }
   if (b.period === "day" || b.period === "week"){
-    var r = periodKeys(b, today()), lim = periodLimit(b, r[0]), sp = spentIn(b, r[0], r[1]);
-    o.limit = lim; o.spent = sp; o.left = Math.min(lim - sp, leftC); o.over = sp > lim;
+    var r = periodKeys(b, today()), sp = spentIn(b, r[0], r[1]), per = b.period === "day" ? cycDaysLeft() : Math.ceil(cycDaysLeft() / 7);
+    /* The limit never promises more than the month's money can pay: what was in the fund before this period, shared over the periods left. */
+    var lim = Math.max(0, Math.min(b.amount, Math.floor((leftC + sp) / Math.max(1, per) / 10) * 10));
+    o.limit = lim; o.per = per; o.spent = sp; o.left = Math.min(lim - sp, leftC); o.over = sp > lim;
   } else { o.limit = fu; o.spent = spC; o.left = leftC; o.over = spC > fu; }
   return o;
 }
@@ -432,7 +434,7 @@ function lastLogDay(){ var f = null; S.tx.forEach(function(t){ if ((t.type === "
 function coveredUntil(){
   var have = Math.max(0, toAssign()), planDay = 0, spendPlanDay = 0, st = sweepTarget(), dim = AVG_MONTH;
   S.budgets.forEach(function(b){ if (b.paused || b.retired || isPot(b) || b.kind === "refill" || b.kind === "sf") return; var m = monthlyNeed(b); planDay += m / dim; if (b.kind === "spend") spendPlanDay += m / dim; var v = budgetView(b); have += Math.max(0, v.leftMonth); });
-  if (st) have += Math.max(0, potBalance(st));
+  if (st){ var sfIn = sumTx(function(t){ return t.type === "alloc" && t.sf && t.budgetId === st.id; }); have += Math.max(0, potBalance(st) - sfIn); }
   if (!planDay) return null;
   var last = lastLogDay(), first = firstLogDay(), t0 = today();
   if (last && last < addDays(t0, -2)) return {stale:true};
@@ -939,7 +941,7 @@ function rowHtml(b){
     if (b.period === "month" && v.funded === 0 && v.spent === 0){ return '<button class="row" data-act="budget" data-id="' + b.id + '"><div class="row-top"><span class="name">' + h(b.name) + '</span><span class="amt num">' + naira(0) + '</span></div><div class="bar"><i style="width:0"></i></div><div class="row-meta"><span>Not funded yet</span><span>' + naira(b.amount) + ' a month</span></div></button>'; }
     meta = '<span>' + (v.over ? 'Over by ' + naira(v.spent - v.limit) : 'left ' + per) + '</span><span>' + naira(v.spent) + ' of ' + naira(v.limit) + '</span>';
     if (v.over) pill = '<span class="pill over">Over</span> ';
-    else if (b.period !== "month" && carried(b) > 0) pill = '<span class="pill">−' + naira(carried(b)) + ' carried</span> ';
+    else if (b.period !== "month" && carried(b) > 0) pill = '<span class="pill">−' + naira(carried(b)) + ' short</span> ';
     if (b.period !== "month" && v.leftMonth < v.limit - v.spent) meta = '<span>Only ' + naira(Math.max(0, v.leftMonth)) + ' funded</span><span>' + naira(v.spent) + ' of ' + naira(v.limit) + '</span>';
   }
   return '<button class="row" data-act="budget" data-id="' + b.id + '"><div class="row-top"><span class="name">' + pill + h(b.name) + '</span><span class="amt num' + (b.kind === "bill" && v.isPaid ? ' in' : '') + '">' + right + '</span></div><div class="bar' + cls + '"><i style="width:' + pct.toFixed(1) + '%"></i></div><div class="row-meta">' + meta + '</div></button>';
@@ -1105,10 +1107,11 @@ function renderSheet(){
     } else {
       var per2 = b.period === "day" ? "today" : b.period === "week" ? "this week" : "this month";
       inner3 += '<div class="big num" style="font-size:48px">' + naira(Math.max(0, v.left)) + '</div><p class="muted">Left ' + per2 + '. ' + naira(v.spent) + ' spent of ' + naira(v.limit) + '.</p>' +
-        (b.period !== "month" && carried(b) > 0 ? '<div class="note">' + naira(carried(b)) + ' came off this ' + (b.period === "day" ? "day" : "week") + ' because the last one went over.</div>' : '') +
+        (b.period !== "month" && carried(b) > 0 ? '<div class="note">' + naira(carried(b)) + ' less than usual this ' + (b.period === "day" ? "day" : "week") + ', because this month\u2019s money is running short.</div>' : '') +
         '<div class="kv"><span>Usual ' + (b.period === "day" ? "daily" : b.period === "week" ? "weekly" : "monthly") + ' amount</span><span>' + naira(b.amount) + '</span></div><div class="kv"><span>Funded this month</span><span>' + naira(v.funded) + ' of ' + naira(monthlyNeed(b)) + '</span></div><div class="kv"><span>Spent this month</span><span>' + naira(spentCyc(b)) + '</span></div>';
       var buf = bufferBudget();
       if (b.period === "month" && v.over && buf && buf.id !== b.id && potBalance(buf) >= v.spent - v.limit) inner3 += '<button class="btn gold block" style="margin-top:14px" data-act="cover" data-id="' + b.id + '">Cover ' + naira(v.spent - v.limit) + ' from ' + h(buf.name) + '</button>';
+      if (b.kind === "spend" && b.period !== "month" && v.limit < b.amount) inner3 += '<button class="btn gold block" style="margin-top:14px" data-act="refill-spend" data-id="' + b.id + '">Add money to ' + h(b.name) + '</button>';
       inner3 += '<div style="display:flex;gap:10px;margin-top:18px;flex-wrap:wrap"><button class="btn primary" data-act="plan-log" data-id="' + b.id + '">Log spending</button><button class="btn ghost" data-act="edit-simple" data-id="' + b.id + '">Edit</button>' + (b.period === "month" && !b.parent && b.group !== "Cushion" && !b.biz ? '<button class="btn ghost" data-act="sheet" data-v="break" data-b="' + b.id + '">Break into items</button>' : '') + '</div>';
     }
     return sheetWrap(b.name, inner3);
@@ -1264,7 +1267,7 @@ function renderSheet(){
       '<div style="margin-top:18px;display:flex;gap:10px"><button class="btn primary" style="flex:1" data-act="setup-edit-save" data-id="' + h(k) + '">Save</button><button class="btn ghost" data-act="setup-edit-remove" data-id="' + h(k) + '">Remove</button></div>', {cancel:"Cancel"});
   }
   if (s.type === "topup"){ var tpb = B(x.id), tpa = S.topups && S.topups[x.id]; if (!tpb || !tpa) return "";
-    var tpr = Math.max(0, Math.min(tpa.amt, cycNeed(tpb) - funded(tpb))), tps = [], tpw = Math.max(0, toAssign());
+    var tpr = Math.max(0, tpa.spend ? tpa.amt : Math.min(tpa.amt, cycNeed(tpb) - funded(tpb))), tps = [], tpw = Math.max(0, toAssign());
     if (tpw > 0) tps.push({id:"wait", name:"Money waiting to be split", bal:tpw});
     var tsw = sweepTarget(); if (tsw && tsw.id !== tpb.id && potBalance(tsw) > 0) tps.push({id:tsw.id, name:tsw.name, bal:potBalance(tsw)});
     goalQueue().forEach(function(g){ if (g.id !== tpb.id && potBalance(g) > 0) tps.push({id:g.id, name:g.name, bal:potBalance(g)}); });
@@ -1551,7 +1554,7 @@ function openDeferred(id){ if (id === "dfHH") openSheet("hh-setup"); else if (id
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
 function val(id){ var el = document.getElementById(id); return el ? el.value : ""; }
 
-var SCN_BLOCK = ["save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought", "pend-done", "floor-fix", "unassign", "del-in-go", "save-hh", "topup-from"];
+var SCN_BLOCK = ["refill-spend", "save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought", "pend-done", "floor-fix", "unassign", "del-in-go", "save-hh", "topup-from"];
 document.addEventListener("click", function(e){
   var el = e.target.closest("[data-act]"); if (!el) return;
   if (el.getAttribute("data-act") === "close-sheet" && e.target.closest("[data-stop]") && !e.target.closest("button")) return;
@@ -1681,11 +1684,14 @@ document.addEventListener("click", function(e){
       S.fitSnooze = ""; var sInc = monthlyIncome(), sGap = sInc ? planMonthly(S.budgets) - sInc : 0; closeSheet(); save(); toast(sGap > 0 ? "Saved. Your plan now costs " + naira(sGap) + " more than you get." : "Saved.", true); break; }
     case "save-income": { snap(); var nsrc = val("ep-src"); if (nsrc) S.source = nsrc; S.nextMoney = val("f-next"); var nia = parseAmt(val("f-inc")); S.income = nia ? {amount:nia, every:val("f-every") === "week" ? "week" : "month"} : null; S.payAnchor = S.income && S.nextMoney ? S.nextMoney : ""; S.fitSnooze = ""; S.cycles = []; upgrade(); pinCycle();
       var iGap = S.income ? planMonthly(S.budgets) - monthlyIncome() : 0; save(); toast(iGap > 0 ? "Saved. Your plan costs " + naira(iGap) + " more than you get." : "Saved.", true); break; }
-    case "topup": { var tb2 = B(id), tp2 = S.topups && S.topups[id]; if (!tb2 || !tp2) break; var rem2 = Math.min(tp2.amt, cycNeed(tb2) - funded(tb2)), av = toAssign();
+    case "refill-spend": { var rb = B(id); if (!rb) break; var rv = budgetView(rb), rneed = Math.round((rb.amount * rv.per - (rv.leftMonth + (rv.spent || 0))) / 10) * 10;
+      if (rneed < 10){ toast(rb.name + " is already covered for the rest of " + cycWord() + "."); break; }
+      S.topups = S.topups || {}; S.topups[id] = {amt:rneed, key:cyc(), spend:true}; save(); openSheet("topup", {id:id}); break; }
+    case "topup": { var tb2 = B(id), tp2 = S.topups && S.topups[id]; if (!tb2 || !tp2) break; var rem2 = tp2.spend ? tp2.amt : Math.min(tp2.amt, cycNeed(tb2) - funded(tb2)), av = toAssign();
       if (rem2 < 10){ delete S.topups[id]; save(); break; }
       if (av < rem2){ openSheet("topup", {id:id}); break; }
       snap(); S.tx.push({id:uid(), type:"alloc", budgetId:id, amount:rem2, month:cyc(), date:today()}); delete S.topups[id]; save(); toast(naira(rem2) + " added to " + tb2.name + ".", true); break; }
-    case "topup-from": { var tb3 = B(id), tp3 = S.topups && S.topups[id]; if (!tb3 || !tp3) break; var rem3 = Math.min(tp3.amt, cycNeed(tb3) - funded(tb3));
+    case "topup-from": { var tb3 = B(id), tp3 = S.topups && S.topups[id]; if (!tb3 || !tp3) break; var rem3 = tp3.spend ? tp3.amt : Math.min(tp3.amt, cycNeed(tb3) - funded(tb3));
       if (rem3 < 10){ delete S.topups[id]; closeSheet(); save(); break; }
       var src3 = v === "wait" ? null : B(v), avail3 = v === "wait" ? Math.max(0, toAssign()) : (src3 ? Math.max(0, potBalance(src3)) : 0), put3 = Math.min(avail3, rem3);
       if (put3 < 10){ toast("There is nothing to take from there."); break; }
@@ -1788,7 +1794,7 @@ document.addEventListener("keydown", function(e){ if (e.key === "Escape" && V.sh
 applyTheme();
 S = load();
 if (S.setupDone){ var up = upgrade(), ch = monthClose(); if (checkStreak() || ch || up) save(); }
-if ("serviceWorker" in navigator){ try { navigator.serviceWorker.register("sw.js").catch(function(){}); } catch(e7){} }
+if ("serviceWorker" in navigator){ try { var hadSW = !!navigator.serviceWorker.controller; navigator.serviceWorker.addEventListener("controllerchange", function(){ if (hadSW && !window.__reloaded){ window.__reloaded = true; location.reload(); } }); navigator.serviceWorker.register("sw.js").catch(function(){}); } catch(e7){} }
 render();
 document.addEventListener("visibilitychange", function(){ if (document.visibilityState === "visible" && S.setupDone){ var c2 = monthClose(); if (checkStreak() || c2) save(); render(); } });
 </script>

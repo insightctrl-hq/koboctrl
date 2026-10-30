@@ -252,7 +252,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "1.5";
+var VERSION = "1.6";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -575,12 +575,13 @@ function weekScore(ws){
   var nsDays = 0; S.tx.forEach(function(t){ if (t.date >= ws && t.date <= end){ if (t.unrecorded) unrec++; if (t.type === "nospend") nsDays++; if (t.type === "withdraw" && t.lockBreak) broke++; } });
   /* Unlogged spending found at a balance check cancels that week's no-spend taps. */
   if (unrec > 0) logged = Math.max(0, logged - nsDays);
-  var f = S.flags[ws] || {}, parts = {
-    log: days ? Math.round(30 * logged / days) : 0,
-    budgets: logged ? Math.max(0, 30 - 10 * overs - 5 * unrec) : 0,
+  /* Staying within budgets only counts for what has been logged: three logged days earn the full points. */
+  var ev = Math.min(1, logged / 3), f = S.flags[ws] || {}, parts = {
+    log: days ? Math.round(30 * logged / Math.max(days, 3)) : 0,
+    budgets: Math.round(Math.max(0, 30 - 10 * overs - 5 * unrec) * ev),
     transfer: f.transfer && f.check && !f.mismatch ? 15 : 0,
     check: f.check ? 15 : 0,
-    locks: broke || !logged ? 0 : 10 };
+    locks: broke ? 0 : Math.round(10 * ev) };
   /* With one account there is no Monday transfer to make, so the other 85 points are scaled to 100. */
   if (sameAcct()){ parts.transfer = null; parts.total = Math.round((parts.log + parts.budgets + parts.check + parts.locks) * 100 / 85); }
   else parts.total = parts.log + parts.budgets + parts.transfer + parts.check + parts.locks;

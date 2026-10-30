@@ -1,3 +1,11 @@
 my-plan.json
 KoboCTRL-my-plan.json
 *.json.bak
+
+# Bank statements must never be committed. Tests generate their own.
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+tests/private/
+tests/shots/

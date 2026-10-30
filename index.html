@@ -252,7 +252,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "1.8";
+var VERSION = "1.9";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -316,9 +316,46 @@ function upgrade(){ var ch = false;
       b.retired = true; b.paused = true; } });
     S.mig4 = true; ch = true; }
   return ch; }
-var storageOK = true;
-function load(){ try { var raw = localStorage.getItem(KEY); return normalise(raw ? JSON.parse(raw) : null); } catch(e){ storageOK = false; return freshState(); } }
-function save(){ if (typeof V !== "undefined" && V.scenario) return; S.lastChange = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(S)); storageOK = true; } catch(e){ storageOK = false; } }
+/* Storage. State lives in IndexedDB, which has room for years of bank rows. The old localStorage copy is never deleted by this version.
+   Writes start at once and never overlap. If IndexedDB is not available the app keeps using localStorage as before. */
+var storageOK = true, storeWarn = "", STORE = {db:null, mode:"local", busy:false, pending:null, saves:0, lastLen:0, note:""};
+var IDB_NAME = "koboctrl", IDB_STORE = "kv", SEEN_KEY = "koboctrl-idb";
+function idbOpen(){ return new Promise(function(res, rej){ if (typeof indexedDB === "undefined" || !indexedDB) return rej(new Error("noidb")); var rq;
+  try { rq = indexedDB.open(IDB_NAME, 1); } catch(e){ return rej(e); }
+  rq.onupgradeneeded = function(){ rq.result.createObjectStore(IDB_STORE); }; rq.onsuccess = function(){ res(rq.result); }; rq.onerror = function(){ rej(rq.error); }; rq.onblocked = function(){ rej(new Error("blocked")); }; }); }
+function idbGet(db, key){ return new Promise(function(res, rej){ var r = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(key); r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); }; }); }
+function idbPut(db, key, val){ return new Promise(function(res, rej){ var tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(val, key); tx.oncomplete = function(){ res(); }; tx.onerror = tx.onabort = function(){ rej(tx.error || new Error("abort")); }; }); }
+function parseState(txt){ if (!txt || typeof txt !== "string") return null; try { var o = JSON.parse(txt); return o && typeof o === "object" ? o : null; } catch(e){ return null; } }
+/* Opens the saved state. The newer of the IndexedDB copy and the old localStorage copy wins, so nothing is lost on the first run after this update or if a write ever failed. */
+function bootState(){
+  return idbOpen().then(function(db){ STORE.db = db; STORE.mode = "idb"; return idbGet(db, "state"); }, function(){ STORE.mode = "local"; return null; })
+  .catch(function(){ STORE.mode = "local"; return null; })
+  .then(function(idbTxt){ var lsTxt = null; try { lsTxt = localStorage.getItem(KEY); } catch(e){}
+    var a = parseState(idbTxt), b = parseState(lsTxt), pick = a, pickTxt = idbTxt;
+    if (b && (!a || (b.lastChange || 0) > (a.lastChange || 0))){ pick = b; pickTxt = lsTxt;
+      if (!a){ try { if (localStorage.getItem(SEEN_KEY) === "1" && STORE.mode === "idb") STORE.note = "Your newest data was not found. The last saved copy from " + new Date(b.lastChange || Date.now()).toLocaleDateString("en-GB") + " was opened. Restore a backup if entries are missing."; } catch(e){} } }
+    if (STORE.mode === "idb" && pick && pickTxt !== idbTxt){
+      return idbPut(STORE.db, "state", pickTxt).then(function(){ return idbGet(STORE.db, "state"); }).then(function(back){ if (back !== pickTxt) throw new Error("verify"); try { localStorage.setItem(SEEN_KEY, "1"); } catch(e){} return pick; })
+        .catch(function(){ STORE.mode = "local"; return pick; }); }
+    if (STORE.mode === "idb") { try { localStorage.setItem(SEEN_KEY, "1"); } catch(e){} }
+    return pick; })
+  .then(function(pick){ S = normalise(pick);
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
+    checkRoom(0); }); }
+function storeIdle(){ return new Promise(function(res){ (function w(){ if (!STORE.busy && STORE.pending == null) res(); else setTimeout(w, 10); })(); }); }
+/* Warns before the browser runs out of room: 80% of the quota for IndexedDB, or 4 million characters for localStorage. */
+function checkRoom(len){ STORE.lastLen = len || STORE.lastLen;
+  if (STORE.mode !== "idb"){ var w = STORE.lastLen > 4e6 ? "full" : ""; if (w !== storeWarn){ storeWarn = w; if (typeof render === "function" && S && S.setupDone) render(); } return; }
+  try { if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(function(e){ var w = e && e.quota && e.usage / e.quota > 0.8 ? "full" : ""; if (w !== storeWarn){ storeWarn = w; if (S && S.setupDone) render(); } }, function(){}); } catch(e){} }
+function persist(){ var txt; try { txt = JSON.stringify(S); } catch(e){ storageOK = false; return; }
+  STORE.saves++;
+  if (STORE.mode !== "idb"){ try { localStorage.setItem(KEY, txt); storageOK = true; } catch(e){ storageOK = false; } if (STORE.saves % 10 === 1) checkRoom(txt.length); return; }
+  STORE.pending = txt; if (!STORE.busy) flushStore(); }
+function flushStore(){ var txt = STORE.pending; if (txt == null) return; STORE.pending = null; STORE.busy = true; var was = storageOK;
+  idbPut(STORE.db, "state", txt).then(function(){ storageOK = true; try { localStorage.setItem(SEEN_KEY, "1"); } catch(e){} },
+    function(){ try { localStorage.setItem(KEY, txt); storageOK = true; } catch(e){ storageOK = false; } })
+  .then(function(){ STORE.busy = false; if (STORE.pending != null) flushStore(); else { if (STORE.saves % 10 === 1) checkRoom(txt.length); if (was !== storageOK && S && S.setupDone) render(); } }); }
+function save(){ if (typeof V !== "undefined" && V.scenario) return; S.lastChange = Date.now(); persist(); }
 function B(id){ for (var i = 0; i < S.budgets.length; i++) if (S.budgets[i].id === id) return S.budgets[i]; return null; }
 function A(id){ for (var i = 0; i < S.accounts.length; i++) if (S.accounts[i].id === id) return S.accounts[i]; return null; }
 function acctByRole(r){ for (var i = 0; i < S.accounts.length; i++) if (S.accounts[i].role === r) return S.accounts[i]; return S.accounts[0]; }
@@ -822,7 +859,10 @@ var CHG_RX = /^(Value Added Tax|Stamp duty|USSD Charge|SMS ALERT CHARGE)/i;
 function normKey(s){ return String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim(); }
 function sameName(a, b){ var x = normKey(a).split(" ").sort().join(" "), y = normKey(b).split(" ").sort().join(" "); return !!x && x === y; }
 /* Reads, checks and orders a statement. Nothing is saved here. */
-function stmtParse(rows0){ var rd = readMoniepoint(rows0); if (!rd || !rd.rows.length) return {error:"This does not look like a Moniepoint statement."};
+/* One reader per bank. The bank is found from the file itself: each reader looks for its own column names. */
+var BANK_READERS = [{id:"moniepoint", name:"Moniepoint", read:function(rows){ return readMoniepoint(rows); }}];
+function detectBank(rows){ for (var i = 0; i < BANK_READERS.length; i++){ var rd = BANK_READERS[i].read(rows); if (rd && rd.rows.length) return {bank:BANK_READERS[i], rd:rd}; } return null; }
+function stmtParse(rows0){ var det = detectBank(rows0); if (!det) return {error:"This bank is not supported yet. Statements from Moniepoint work now."}; var rd = det.rd;
   var rows = rd.rows, head = rd.head, ch = chainOrder(rows, head.open), bad = [];
   var firstBad = -1; ch.order.forEach(function(ix, pos){ var r = rows[ix]; if (Math.abs(r.p - r.deb + r.cre - r.q) > 0.005){ bad.push(ix); if (firstBad < 0) firstBad = pos; } });
   var good = firstBad >= 0 ? ch.order.slice(0, firstBad) : ch.order, held = rows.length - good.length, gap = null;
@@ -842,25 +882,29 @@ function stmtParse(rows0){ var rd = readMoniepoint(rows0); if (!rd || !rd.rows.l
       items.push({r:r.ref, at:r.at, d:r.d, m:r.cre, n:isChg ? "Charge refund" : (r.srcInst || "Money in"), i:r.srcInst, w:r.narr.slice(0, 40), b:r.q, k:isChg ? "ref" : "in", c:0, f:[], y:isChg ? "" : key, p:r.p, own:false }); return; }
     var nm = r.ben || r.narr.replace(/\s*DETAIL.*$/i, "").slice(0, 40) || "Payment", ky = r.ben ? "p:" + normKey(r.ben) + "|" + normKey(r.benInst) : "w:" + normKey(r.narr.replace(/[0-9]+/g, "#")).slice(0, 40);
     items.push({r:r.ref, at:r.at, d:r.d, m:amt, n:nm, i:r.benInst, w:r.narr.slice(0, 40), b:r.q, k:"pay", c:r.fee || 0, f:[], y:ky, p:r.p, kind:r.type, own:!!r.ben && !!head.holder && sameName(r.ben, head.holder)}); });
-  return {rows:rows, head:head, good:good.length, held:held, bad:bad.length, gap:gap, checks:checks, items:items, from:rows.reduce(function(m, r){ return !m || r.d < m ? r.d : m; }, ""), to:rows.reduce(function(m, r){ return !m || r.d > m ? r.d : m; }, ""), sumDebit:sd, sumCredit:sc,
+  return {bank:det.bank.name, rows:rows, head:head, good:good.length, held:held, bad:bad.length, gap:gap, checks:checks, items:items, from:rows.reduce(function(m, r){ return !m || r.d < m ? r.d : m; }, ""), to:rows.reduce(function(m, r){ return !m || r.d > m ? r.d : m; }, ""), sumDebit:sd, sumCredit:sc,
     first:rows.length ? ord[0] : null}; }
 function dataBudget(){ for (var i = 0; i < S.budgets.length; i++){ var b = S.budgets[i]; if (b.kind === "spend" && !b.retired && !b.biz && /airtime|data/i.test(b.name)) return b; } return null; }
 function bankBudget(){ for (var i = 0; i < S.budgets.length; i++) if (!S.budgets[i].retired && /^bank charges$/i.test(S.budgets[i].name)) return S.budgets[i]; return null; }
 function sortTargets(){ return S.budgets.filter(function(b){ return !b.retired && b.kind !== "sf" && b.kind !== "floor" && !b.reward; }); }
 function feedTxs(f){ return (f.tx || []).map(function(id){ for (var i = 0; i < S.tx.length; i++) if (S.tx[i].id === id) return S.tx[i]; return null; }).filter(Boolean); }
-/* Works out what an import would do, without changing anything. */
-function stmtPlan(im){ var P = im.p, a = A(im.acct), seen = {}, used = {}, pl = {add:[], dup:0, before:0, matched:0, auto:0, uns:0, own:0, loose:0, looseAmt:0, total:0};
+/* Works out what an import would do, without changing anything.
+   Rows before the app's own start date are kept as history only. Rows in cycles that have already closed are real, and their unsorted spending comes out of Leftovers at once. */
+function importDefaultFrom(P){ var cs = cyc(); return cs < P.from ? P.from : cs > P.to ? P.to : cs; }
+function stmtPlan(im){ var P = im.p, a = A(im.acct), seen = {}, used = {}, cs = cyc(), st0 = S.started || "", cycSeen = {}, pl = {add:[], dup:0, before:0, matched:0, auto:0, uns:0, own:0, loose:0, looseAmt:0, total:0, hist:0, past:0, now:0, pastIn:0, pastUns:0, cycles:0, pastFrom:"", pastTo:"", diff:0, recDate:"", stBal:0, exp:0, hasRef:false, leftovers:!!sweepTarget()};
   S.feed.forEach(function(f){ seen[f.r] = 1; (f.f || []).forEach(function(x){ seen[x] = 1; }); });
   var dayGap = function(x, y){ return Math.abs(dayDiff(x, y)); };
   P.items.forEach(function(it){ if (it.d < (im.from || "")){ pl.before++; return; }
     if (seen[it.r]){ pl.dup++; return; }
-    var amt = Math.abs(it.m), net = r2(amt - (it.c || 0)), hit = null, best = 9;
+    var amt = Math.abs(it.m), net = r2(amt - (it.c || 0)), hit = null, best = 9, past = it.d < cs;
+    if (past){ cycSeen[cycOf(it.d)] = 1; if (!pl.pastFrom || it.d < pl.pastFrom) pl.pastFrom = it.d; if (!pl.pastTo || it.d > pl.pastTo) pl.pastTo = it.d; }
+    if (it.d < st0){ pl.hist++; pl.add.push({it:it, how:"hist"}); return; }
     S.tx.forEach(function(t){ if (t.feed || used[t.id] || t.opening) return; var g = dayGap(t.date, it.d); if (g > 1 || g >= best) return;
       var ok = false, acc = t.account || ((B(t.budgetId) || {}).account);
       if (it.m < 0) ok = ((t.type === "out" || t.type === "potSpend") && acc === im.acct && (Math.abs(t.amount - amt) < 0.5 || Math.abs(t.amount - net) < 0.5)) || (t.type === "move" && t.from === im.acct && (Math.abs(t.amount - amt) < 0.5 || Math.abs(t.amount - net) < 0.5));
       else ok = (t.type === "in" && t.account === im.acct && Math.abs(t.amount - amt) < 0.5) || (t.type === "move" && t.to === im.acct && Math.abs(t.amount - amt) < 0.5);
       if (ok){ hit = t; best = g; } });
-    if (hit){ used[hit.id] = 1; pl.matched++; pl.add.push({it:it, match:hit.id, how:"match"}); return; }
+    if (hit){ used[hit.id] = 1; pl.matched++; if (past) pl.past++; else pl.now++; pl.add.push({it:it, match:hit.id, how:"match"}); return; }
     var how = "uns", tid = "";
     if (it.k === "chg"){ how = "bank"; pl.loose++; pl.looseAmt += amt; }
     else if (it.k === "ref"){ how = "in"; }
@@ -870,15 +914,30 @@ function stmtPlan(im){ var P = im.p, a = A(im.acct), seen = {}, used = {}, pl = 
         else if (/^(AIRTIME|DATA_PURCHASE)$/.test(it.kind || "") || /^(AIRTIME|DATA PURCHASE)/i.test(it.w || "")){ var db = dataBudget(); if (db){ how = "budget"; tid = db.id; } } }
       else how = "in"; }
     if (how === "uns") { pl.uns++; if (it.own) pl.own++; } else if (how === "budget" || how === "own") pl.auto++;
+    if (past){ pl.past++; if (how === "uns" && it.m < 0) pl.pastUns += amt; if (it.m > 0 && (how === "in" || how === "uns")) pl.pastIn += amt; } else pl.now++;
     pl.add.push({it:it, how:how, tid:tid}); });
-  pl.total = pl.add.length;
+  pl.total = pl.add.length; pl.cycles = Object.keys(cycSeen).length;
+  /* The statement's balance on the first day that counts, against what the app holds for this account on that day. */
+  var rd = im.from || P.from; if (st0 && st0 > rd) rd = st0; pl.recDate = rd; pl.recAt = addDays(rd, -1);
+  var first = null; for (var i = 0; i < P.items.length; i++) if (P.items[i].d >= rd){ first = P.items[i]; break; }
+  if (first && a){ var keep = S.tx; S.tx = keep.filter(function(t){ return t.date < rd; }); var exp = acctBalance(a); S.tx = keep; pl.exp = r2(exp); pl.stBal = first.p; pl.hasRef = true; if (Math.abs(first.p - exp) >= 0.005) pl.diff = r2(first.p - exp); pl.tiny = !!pl.diff && Math.abs(pl.diff) < 1; }
+  var fromBal = null; for (var j = 0; j < P.items.length; j++) if (P.items[j].d >= (im.from || P.from)){ fromBal = P.items[j].p; break; } pl.fromBal = fromBal;
   var months = P.from && P.to ? Math.max(1, Math.round(dayDiff(P.from, P.to) / 30.4)) : 1; pl.bankAmt = pl.loose ? Math.max(100, Math.ceil(pl.looseAmt / months / 100) * 100) : 0;
+  pl.needsReview = pl.cycles > 0 || (!!pl.diff && !pl.tiny);
   return pl; }
 function bankBudgetEnsure(acct, amt){ var b = bankBudget(); if (b) return b;
   b = {id:uid(), created:today(), name:"Bank charges", group:"Daily needs", kind:"spend", period:"month", amount:amt || 100, order:1, account:acct}; S.budgets.push(b); return b; }
-function applyStmt(im){ var pl = stmtPlan(im), a = A(im.acct), made = 0; if (!pl.total) return 0; snap();
+/* Saves a backup file to the phone. Returns false when the browser blocks the download. */
+function saveBackupFile(tag){ try { var blob = new Blob([backupText()], {type:"application/json"}), el = document.createElement("a"); el.href = URL.createObjectURL(blob); el.download = "koboctrl-backup-" + (tag ? tag + "-" : "") + today() + ".json"; document.body.appendChild(el); el.click(); el.remove(); S.lastBackup = Date.now(); return true; } catch(e){ return false; } }
+function applyStmt(im, opts){ var pl = stmtPlan(im), a = A(im.acct), made = 0, cs = cyc(), lo = sweepTarget(); im.res = {made:0, conv:0}; var fixIt = !!pl.diff && ((opts && opts.correct) || pl.tiny); if (!pl.total && !fixIt) return 0; snap();
   var bank = pl.loose ? bankBudgetEnsure(im.acct, pl.bankAmt) : null;
+  /* Money that arrived in a closed cycle and was never assigned ended up as leftovers. */
+  var toLeft = function(inTx, amt, d, atT){ if (d < cs && lo){ S.tx.push({id:uid(), type:"alloc", budgetId:lo.id, amount:amt, month:cycOf(d), date:d, at:atT || 0, src:"st", viaIn:inTx.id}); } };
+  if (fixIt){ var ra = pl.recAt, fx = {id:uid(), account:im.acct, note:"Difference found at import", date:ra, at:0, src:"st", feed:"fix"};
+    if (pl.diff > 0){ S.tx.push(Object.assign({type:"in", amount:pl.diff}, fx)); toLeft(fx, pl.diff, ra, 0); }
+    else S.tx.push(Object.assign({type:"out", budgetId:"", uns:true, amount:r2(-pl.diff)}, fx)); }
   pl.add.forEach(function(e){ var it = e.it, amt = Math.abs(it.m), net = r2(amt - (it.c || 0)), f = {r:it.r, s:"st", a:im.acct, d:it.d, at:it.at, m:it.m, n:it.n, i:it.i, w:it.w, b:it.b, k:it.k, c:it.c || 0, f:it.f || [], y:it.y, tx:[], st:"ok"}, base = {account:im.acct, note:it.n, date:it.d, at:it.at, feed:it.r, src:"st"};
+    if (e.how === "hist"){ var ht = {id:uid(), type:"hist", dir:it.m < 0 ? "out" : "in", amount:amt, account:im.acct, note:it.n, date:it.d, at:it.at, feed:it.r, src:"st"}; S.tx.push(ht); f.tx.push(ht.id); f.st = "hist"; S.feed.push(f); made++; return; }
     if (e.how === "match"){ var t = S.tx.filter(function(z){ return z.id === e.match; })[0]; if (t){ t.feed = it.r; t.at = t.at || it.at;
         if (t.type === "out" || t.type === "potSpend") t.amount = amt; else if (t.type === "move" && it.m < 0 && amt - t.amount > 0.5){ var ft = {id:uid(), type:"out", budgetId:"", uns:true, amount:r2(amt - t.amount), account:im.acct, note:"Bank fee", date:it.d, at:it.at, feed:it.r, src:"st"}; S.tx.push(ft); f.tx.push(ft.id); }
         f.tx.unshift(t.id); } S.feed.push(f); made++; return; }
@@ -886,22 +945,24 @@ function applyStmt(im){ var pl = stmtPlan(im), a = A(im.acct), made = 0; if (!pl
     if (e.how === "own"){ if (it.m < 0){ mk1({type:"move", from:im.acct, to:e.tid, amount:net}); delete S.tx[S.tx.length - 1].account; if (it.c > 0) mk1({type:"out", budgetId:"", uns:true, amount:it.c, note:"Bank fee"}); } else { mk1({type:"move", from:e.tid, to:im.acct, amount:amt}); delete S.tx[S.tx.length - 1].account; } f.st = "own"; }
     else if (e.how === "budget"){ var bb = B(e.tid); mk1({type:isPot(bb) ? "potSpend" : "out", budgetId:bb.id, amount:amt}); }
     else if (e.how === "bank"){ mk1({type:"out", budgetId:bank.id, amount:amt}); }
-    else if (e.how === "in"){ mk1({type:"in", amount:amt}); if (it.k === "ref") f.st = "ok"; }
-    else { if (it.m < 0){ mk1({type:"out", budgetId:"", uns:true, amount:amt}); f.st = "uns"; } else { mk1({type:"in", amount:amt}); f.st = it.own ? "uns" : "ok"; } }
+    else if (e.how === "in"){ var it2 = mk1({type:"in", amount:amt}); toLeft(it2, amt, it.d, it.at); if (it.k === "ref") f.st = "ok"; }
+    else { if (it.m < 0){ mk1({type:"out", budgetId:"", uns:true, amount:amt}); f.st = "uns"; } else { var it3 = mk1({type:"in", amount:amt}); toLeft(it3, amt, it.d, it.at); f.st = it.own ? "uns" : "ok"; } }
     if (it.own && f.st === "uns") f.o = 1;
     S.feed.push(f); made++; });
-  save(); return made; }
+  if (pl.cycles > 0 && lo){ var closedTo = addDays(cs, -1); im.res.conv = convertUnsAtClose(closedTo, lo); }
+  im.res.made = made; save(); return made; }
 /* Turns a feed row into the entry the person chose. mode is "budget", "own" or "in". */
 function sortFeedRow(f, mode, tid){ var txs = feedTxs(f), main = txs[0]; if (!main || f.st === "drop") return false;
   if (mode === "budget"){ var b = B(tid); if (!b || f.m >= 0 || !main.uns) return false; main.budgetId = b.id; delete main.uns; main.type = isPot(b) ? "potSpend" : "out"; f.st = "ok"; return true; }
   if (mode === "own"){ var o = A(tid); if (!o || o.id === f.a) return false; var amt = Math.abs(f.m);
     if (f.m < 0){ if (!main.uns && main.type !== "out") return false; var net = r2(amt - (f.c || 0)); main.type = "move"; main.from = f.a; main.to = o.id; main.amount = net; delete main.budgetId; delete main.uns; delete main.account;
       if (f.c > 0){ var ft = {id:uid(), type:"out", budgetId:"", uns:true, amount:f.c, account:f.a, note:"Bank fee", date:f.d, at:f.at, feed:f.r, src:"st"}; S.tx.push(ft); f.tx.push(ft.id); } }
-    else { if (main.type !== "in") return false; main.type = "move"; main.from = o.id; main.to = f.a; delete main.account; }
+    else { if (main.type !== "in") return false; S.tx = S.tx.filter(function(z){ return z.viaIn !== main.id; }); main.type = "move"; main.from = o.id; main.to = f.a; delete main.account; }
     f.st = "own"; delete f.o; return true; }
   if (mode === "in"){ f.st = "ok"; delete f.o; return true; }
   return false; }
-function dropFeedFor(id){ S.feed.forEach(function(f){ if (f.tx && f.tx.indexOf(id) >= 0){ f.tx = f.tx.filter(function(x){ return x !== id; }); if (!f.tx.length) f.st = "drop"; } }); }
+function linkedAlloc(id){ return sumTx(function(t){ return t.viaIn === id; }); }
+function dropFeedFor(id){ S.tx = S.tx.filter(function(z){ return z.viaIn !== id; }); S.feed.forEach(function(f){ if (f.tx && f.tx.indexOf(id) >= 0){ f.tx = f.tx.filter(function(x){ return x !== id; }); if (!f.tx.length) f.st = "drop"; } }); }
 function convertUnsAtClose(upto, st){ if (!st) return 0; var tot = 0;
   S.tx.forEach(function(t){ if (t.uns && t.date <= upto){ t.type = "potSpend"; t.budgetId = st.id; delete t.uns; tot += t.amount; } });
   if (tot > 0) S.feed.forEach(function(f){ if (f.st === "uns" && f.d <= upto && f.m < 0) f.st = "ok"; });
@@ -910,28 +971,40 @@ function stmtLoad(file){ V.imp = {name:file.name, busy:true}; openSheet("import"
   file.arrayBuffer().then(function(buf){ var z = zipEntries(buf), names = Object.keys(z), sheet = names.filter(function(n){ return /^xl\/worksheets\/sheet\d+\.xml$/.test(n); }).sort()[0];
     if (!sheet) throw new Error("sheet"); return Promise.all([zipText(z[sheet]), zipText(z["xl/sharedStrings.xml"])]); })
   .then(function(x){ var P = stmtParse(xlRows(x[0], x[1])); if (P.error){ V.imp = {name:file.name, error:P.error}; render(); return; }
-    var acc = S.accounts.filter(function(a){ return /moniepoint/i.test(a.name); })[0] || acctByRole("spend") || S.accounts[0];
-    V.imp = {name:file.name, p:P, acct:acc ? acc.id : "", from:(S.started && S.started > P.from ? S.started : P.from)}; render(); })
-  .catch(function(e){ V.imp = {name:file.name, error:e && e.message === "nodecomp" ? "This browser cannot open Excel files. Update it, then try again." : "That file could not be read. Choose the Moniepoint .xlsx export."}; render(); }); }
+    var bn = P.bank.toLowerCase(), acc = S.accounts.filter(function(a){ return String(a.name).toLowerCase().indexOf(bn) >= 0; })[0] || acctByRole("spend") || S.accounts[0];
+    V.imp = {name:file.name, p:P, acct:acc ? acc.id : "", from:importDefaultFrom(P)}; render(); })
+  .catch(function(e){ V.imp = {name:file.name, error:e && e.message === "nodecomp" ? "This browser cannot open Excel files. Update it, then try again." : "That file could not be read. Choose the .xlsx statement from your bank."}; render(); }); }
 function stmtSheet(){ var im = V.imp; if (!im) return "";
   if (im.busy) return sheetWrap("Import statement", '<p class="muted">Reading ' + h(im.name) + '</p>', {cancel:"Cancel"});
   if (im.error) return sheetWrap("Import statement", '<div class="note">' + h(im.error) + '</div>', {cancel:"Close"});
-  var P = im.p, pl = stmtPlan(im), a = A(im.acct), ck = P.checks, inner = "";
-  inner += '<p class="muted">' + h(im.name) + ' · ' + P.rows.length.toLocaleString("en-NG") + ' rows · ' + fmtDay(P.from) + ' to ' + fmtDay(P.to) + '</p>';
-  if (P.gap){ inner += P.gap.kind === "bad" ? '<div class="note" style="border-color:var(--red)"><b>One row does not add up.</b> On ' + fmtDay(P.gap.row.d) + ' a row shows ' + n2(P.gap.row.p) + ' before and ' + n2(P.gap.row.q) + ' after, which does not match its amount. ' + P.held.toLocaleString("en-NG") + ' rows from there are held back.</div>'
-      : '<div class="note" style="border-color:var(--red)"><b>Rows are missing.</b> After ' + fmtDay(P.gap.last.d) + ' the balance is ' + n2(P.gap.last.q) + ', and the next row starts at ' + n2(P.gap.next ? P.gap.next.p : 0) + '. ' + n2(Math.abs(P.gap.missing)) + ' is missing from this file. ' + P.held.toLocaleString("en-NG") + ' rows after the gap are held back.</div>'; }
+  var P = im.p, pl = stmtPlan(im), a = A(im.acct), ck = P.checks, inner = "", kv = function(l, v){ return '<div class="kv"><span>' + l + '</span><span>' + v + '</span></div>'; }, nn = function(x){ return x.toLocaleString("en-NG"); };
+  if (im.confirm){
+    inner += '<p class="muted">' + h(P.bank) + ' · ' + h(a ? a.name : "") + ' · from ' + fmtDay(im.from) + '</p><div style="margin-top:10px">';
+    inner += kv("Rows to add", nn(pl.add.length));
+    if (pl.cycles) inner += kv("Past cycles added", nn(pl.cycles)) + '<p class="small muted" style="margin:0 0 6px">' + fmtDay(pl.pastFrom) + ' to ' + fmtDay(pl.pastTo) + '</p>';
+    if (pl.hist) inner += kv("Before the app started", nn(pl.hist) + ' · history only');
+    if (pl.hasRef) inner += kv("Statement balance on " + fmtDay(pl.recDate), n2(pl.stBal)) + kv("Your app on that day", n2(pl.exp));
+    if (pl.diff && !pl.tiny) inner += kv("Difference", (pl.diff > 0 ? '+' : '') + n2(pl.diff));
+    if (pl.cycles && pl.pastIn > 0) inner += kv("Money in, past cycles", n2(pl.pastIn));
+    if (pl.cycles && pl.pastUns > 0) inner += kv("Unsorted spending, past cycles", n2(pl.pastUns));
+    inner += '</div>';
+    if (pl.cycles) inner += '<p class="small muted" style="margin-top:10px">' + (pl.leftovers ? 'Money in from past cycles goes to Leftovers. Unsorted spending from past cycles comes out of Leftovers now.' : 'There is no Leftovers pot, so unsorted spending from past cycles stays against Safe to spend.') + '</p>';
+    if (pl.diff && !pl.tiny) inner += '<p class="small muted" style="margin-top:6px">' + (pl.diff > 0 ? 'Correcting adds ' + n2(pl.diff) + ' as money waiting to be assigned.' : 'Correcting takes ' + n2(-pl.diff) + ' out of Leftovers.') + '</p>';
+    inner += '<p class="small muted" style="margin-top:6px">A backup file downloads first.</p><div style="display:flex;flex-direction:column;gap:10px;margin-top:16px">' +
+      ((pl.diff && !pl.tiny) ? '<button class="btn primary block" data-act="stmt-go" data-v="fix">Correct my balance and import</button><button class="btn ghost block" data-act="stmt-go" data-v="keep">Import without correcting</button>' : '<button class="btn primary block" data-act="stmt-go" data-v="keep">Confirm and import</button>') +
+      '<button class="btn ghost block" data-act="stmt-back">Back</button></div>';
+    return sheetWrap("Confirm import", inner, {cancel:"Cancel"}); }
+  inner += '<p class="muted">' + h(P.bank) + ' · ' + h(im.name) + ' · ' + nn(P.rows.length) + ' rows · ' + fmtDay(P.from) + ' to ' + fmtDay(P.to) + '</p>';
+  if (P.gap){ inner += P.gap.kind === "bad" ? '<div class="note" style="border-color:var(--red)"><b>One row does not add up.</b> On ' + fmtDay(P.gap.row.d) + ' a row shows ' + n2(P.gap.row.p) + ' before and ' + n2(P.gap.row.q) + ' after, which does not match its amount. ' + nn(P.held) + ' rows from there are held back.</div>'
+      : '<div class="note" style="border-color:var(--red)"><b>Rows are missing.</b> After ' + fmtDay(P.gap.last.d) + ' the balance is ' + n2(P.gap.last.q) + ', and the next row starts at ' + n2(P.gap.next ? P.gap.next.p : 0) + '. ' + n2(Math.abs(P.gap.missing)) + ' is missing from this file. ' + nn(P.held) + ' rows after the gap are held back.</div>'; }
   else if (ck.debitOk && ck.creditOk && ck.closeOk) inner += '<div class="note">Totals match the statement header. Closing balance ' + n2(P.items.length ? P.items[P.items.length - 1].b : 0) + '.</div>';
   else inner += '<div class="note" style="border-color:var(--red)">The rows do not add up to the header totals. Check that the file is complete.</div>';
   inner += '<label class="f" for="imp-acct">This statement is for</label><select class="t" id="imp-acct">' + acctOptions(im.acct) + '</select>' +
-    '<label class="f" for="imp-from">Import from</label><input class="t" type="date" id="imp-from" value="' + h(im.from) + '" min="' + h(S.started && S.started > P.from ? S.started : P.from) + '" max="' + h(P.to) + '">';
-  var first = null; for (var i = 0; i < P.items.length; i++) if (P.items[i].d >= im.from){ first = P.items[i]; break; }
-  if (first && a){ var keep = S.tx; S.tx = keep.filter(function(t){ return t.date < im.from; }); var exp = acctBalance(a); S.tx = keep;
-    if (Math.abs(first.p - exp) > 1) inner += '<div class="note" style="margin-top:12px">The statement shows ' + n2(first.p) + ' in this account on that day. Your app has ' + n2(exp) + '. The difference of ' + n2(first.p - exp) + ' stays until you run a balance check.</div>'; }
-  inner += '<div style="margin-top:14px">' + [["New rows", pl.add.length - pl.matched], ["Joined to entries you made", pl.matched], ["Already imported", pl.dup], ["Before the start date", pl.before]].map(function(r){ return '<div class="kv"><span>' + r[0] + '</span><span>' + r[1].toLocaleString("en-NG") + '</span></div>'; }).join("") + '</div>';
-  inner += '<div class="kv"><span>Sorted by your earlier choices</span><span>' + pl.auto.toLocaleString("en-NG") + '</span></div><div class="kv"><span>Left to sort</span><span>' + pl.uns.toLocaleString("en-NG") + '</span></div>';
-  if (pl.uns) inner += '<p class="small muted" style="margin-top:8px">Rows left to sort already count against Safe to spend. Sorting only moves them into the right budget.</p>';
+    '<label class="f" for="imp-from">Start from</label><input class="t" type="date" id="imp-from" value="' + h(im.from) + '" min="' + h(P.from) + '" max="' + h(P.to) + '">';
+  inner += '<div style="margin-top:14px">' + [["New rows", pl.add.length - pl.matched], ["Joined to entries you made", pl.matched], ["Already imported", pl.dup], ["Before the start date", pl.before]].map(function(r){ return kv(r[0], nn(r[1])); }).join("") + kv("Sorted by your earlier choices", nn(pl.auto)) + kv("Left to sort", nn(pl.uns)) + '</div>';
+  if (pl.uns) inner += '<p class="small muted" style="margin-top:8px">Rows left to sort in this cycle already count against Safe to spend. Sorting only moves them into the right budget.</p>';
   if (pl.loose && !bankBudget()) inner += '<p class="small muted" style="margin-top:8px">A Bank charges budget of ' + naira(pl.bankAmt) + ' a month will be added for ' + pl.loose + ' fee rows.</p>';
-  var n = pl.add.length; inner += '<div style="margin-top:18px"><button class="btn primary block" data-act="stmt-go"' + (n ? '' : ' disabled') + '>' + (P.gap ? 'Import the ' : 'Import ') + n.toLocaleString("en-NG") + ' rows</button></div>';
+  var n = pl.add.length; inner += '<div style="margin-top:18px"><button class="btn primary block" data-act="stmt-go" data-v="' + (pl.needsReview ? 'review' : 'keep') + '"' + (n || pl.diff ? '' : ' disabled') + '>' + (pl.needsReview ? 'Review ' : P.gap ? 'Import the ' : 'Import ') + nn(n) + ' rows</button></div>';
   return sheetWrap("Import statement", inner, {cancel:"Cancel"}); }
 function fmtDay(k){ if (!k) return ""; var d = parseDk(k); return d.getDate() + " " + ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()] + " " + d.getFullYear(); }
 function feedSheet(x){ var tab = x.tab || "sort", list = tab === "sort" ? unsortedRows() : S.feed.filter(function(f){ return f.st !== "drop"; }), idx = {};
@@ -945,14 +1018,15 @@ function feedSheet(x){ var tab = x.tab || "sort", list = tab === "sort" ? unsort
   return sheetWrap("Bank statements", inner, {cancel:"Close"}); }
 function feedRowSheet(x){ var f = S.feed[+x.i]; if (!f) return "";
   var mode = x.mode || (f.o ? "own" : f.m < 0 ? "budget" : "in"), out = f.m < 0, cur = feedTxs(f)[0], inner = '<p class="muted">' + h(f.i ? f.i + ' · ' : '') + fmtDay(f.d) + ' · ' + n2(f.m) + (f.c > 0 ? ' (' + n2(f.c) + ' fee included)' : '') + '</p>';
+  if (f.st === "hist") return sheetWrap(f.n, inner + '<p class="muted" style="margin-top:12px">From before the app started. It is kept as history and does not change any balance.</p>', {cancel:"Back"});
   if (f.st === "own" || (out && f.st !== "uns")){ var cb = cur && cur.budgetId ? (B(cur.budgetId) || {}).name : ""; return sheetWrap(f.n, inner + '<p class="muted" style="margin-top:12px">' + (f.st === "own" ? 'Recorded as a move between your own accounts.' : cb ? 'Recorded under ' + h(cb) + '. Change it from the entry in History.' : 'Recorded.') + '</p>', {cancel:"Back"}); }
   var modes = out ? [["budget", "Spent on"], ["own", "My own account"]] : [["in", "Money in"], ["own", "My own account"]];
   var more = f.y ? S.feed.filter(function(g){ return g !== f && g.st === "uns" && g.y === f.y && (mode === "own" || (mode === "budget" && g.m < 0)); }).length : 0;
   inner += '<div class="seg" role="group" aria-label="What is this">' + modes.map(function(m){ return '<button data-act="feed-mode" data-v="' + m[0] + '" aria-pressed="' + (mode === m[0]) + '">' + m[1] + '</button>'; }).join("") + '</div>';
   if (mode === "budget") inner += '<label class="f" for="fr-b">Budget</label><select class="t" id="fr-b">' + sortTargets().map(function(b){ return '<option value="' + b.id + '">' + h(b.name) + '</option>'; }).join("") + '</select>';
   if (mode === "own"){ var others = S.accounts.filter(function(a){ return a.id !== f.a; });
-    inner += '<label class="f" for="fr-a">' + (out ? 'Where did it go' : 'Where did it come from') + '</label>' + (others.length ? '<select class="t" id="fr-a">' + others.map(function(a){ return '<option value="' + a.id + '">' + h(a.name) + '</option>'; }).join("") + '</select>' : '') +
-      '<p class="small muted" style="margin-top:8px">Moves between your own accounts are not spending and not income. The other account must be in KoboCTRL.</p><button class="link" data-act="edit-account" data-id="" data-back="feed">Add an account</button>'; }
+    inner += '<label class="f" for="fr-a">' + (out ? 'Where did it go' : 'Where did it come from') + '</label>' + (others.length ? '<select class="t" id="fr-a">' + others.map(function(a){ return '<option value="' + a.id + '"' + (x.pick === a.id ? ' selected' : '') + '>' + h(a.name) + '</option>'; }).join("") + '</select>' : '') +
+      '<p class="small muted" style="margin-top:8px">Moves between your own accounts are not spending and not income. The other account must be in KoboCTRL.</p><button class="link" data-act="feed-add-account" data-id="' + x.i + '">Add an account</button>'; }
   inner += '<label class="f" style="display:flex;gap:8px;align-items:center;margin-top:14px"><input type="checkbox" id="fr-rem" checked> Do the same next time for ' + h(f.n) + (more ? ' (' + more.toLocaleString("en-NG") + ' more rows now)' : '') + '</label>' +
     '<div style="margin-top:16px"><button class="btn primary block" data-act="feed-save" data-id="' + x.i + '">Save</button></div>';
   return sheetWrap(f.n, inner, {cancel:"Back"}); }
@@ -1022,7 +1096,7 @@ function render(){
   var body = V.tab === "spend" ? renderSpend() : V.tab === "goals" ? renderSavings() : V.tab === "progress" ? renderProgress() : V.tab === "settings" ? renderSettings() : renderPlan();
   var tabs = [["plan","Plan"],["spend","Spend"],["goals","Savings"],["progress","Progress"],["settings","Settings"]].map(function(t){
     return '<button class="tab" data-act="tab" data-v="' + t[0] + '"' + (V.tab === t[0] ? ' aria-current="page"' : '') + '>' + IC[t[0]] + '<span>' + t[1] + '</span></button>'; }).join("");
-  $("#app").innerHTML = (storageOK ? '' : '<div class="savewarn" role="alert"><span>Your changes are not being saved.</span><button data-act="backup">Back up now</button></div>') + '<div class="wrap">' + (V.scenario ? scnBanner() : '') + body + '</div>' +
+  $("#app").innerHTML = (storageOK ? (storeWarn ? '<div class="savewarn" role="alert"><span>Storage on this phone is almost full.</span><button data-act="backup">Back up now</button></div>' : '') : '<div class="savewarn" role="alert"><span>Your changes are not being saved.</span><button data-act="backup">Back up now</button></div>') + '<div class="wrap">' + (V.scenario ? scnBanner() : '') + body + '</div>' +
     (V.scenario ? '' : '<button class="fab" data-act="sheet" data-v="log" aria-label="Record money in or out">' + IC.plus + '</button>') +
     '<nav class="tabbar" aria-label="Main"><div class="in-bar">' + tabs + '</div></nav>' +
     (V.sheet ? renderSheet() : '') +
@@ -1242,7 +1316,7 @@ function renderSettings(){
     S.budgets.filter(function(b){ return !b.retired; }).map(function(b){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-simple" data-id="' + b.id + '"><span><b style="font-weight:600">' + h(b.name) + '</b><br><span class="small muted">' + h(b.group) + ' · ' + kindLabel(b) + '</span></span><span class="num" style="font-size:19px">' + naira(b.amount) + '</span></button>'; }).join("") + '</section>';
   html += '<section class="card group"><div class="group-head"><span class="label">Accounts</span><button class="link" data-act="edit-account" data-id="">Add</button></div>' +
     S.accounts.map(function(a){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-account" data-id="' + a.id + '"><span><b style="font-weight:600">' + h(a.name) + '</b><br><span class="small muted">' + roleLabel(a.role) + (a.role === "save" ? ' · pots hold ' + naira(envelopeHeld(a)) : '') + '</span>' + (a.role === "save" && Math.abs(acctBalance(a) - envelopeHeld(a)) >= 100 ? '<br><span class="small" style="color:var(--red)">' + (acctBalance(a) > envelopeHeld(a) ? naira(acctBalance(a) - envelopeHeld(a)) + ' more than your pots' : naira(envelopeHeld(a) - acctBalance(a)) + ' less than your pots') + '</span>' : '') + '</span><span class="num" style="font-size:19px">' + naira(acctBalance(a)) + '</span></button>'; }).join("") + '</section>';
-  html += '<section class="card"><div class="label" style="margin-bottom:10px">Bank statements</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="stmt-pick">Import Moniepoint statement</button>' + (S.feed.length ? '<button class="btn ghost" data-act="feed-list">' + (unsortedRows().length ? 'To sort ' + unsortedRows().length : 'Imported rows') + '</button>' : '') + '</div><p class="small muted" style="margin:10px 0 0">The Excel file is read on this phone and never uploaded.</p></section>';
+  html += '<section class="card"><div class="label" style="margin-bottom:10px">Bank statements</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="stmt-pick">Import bank statement</button>' + (S.feed.length ? '<button class="btn ghost" data-act="feed-list">' + (unsortedRows().length ? 'To sort ' + unsortedRows().length : 'Imported rows') + '</button>' : '') + '</div><p class="small muted" style="margin:10px 0 0">The Excel file is read on this phone and never uploaded.</p></section>';
   if (S.accounts.length > 1 && !sameAcct()) html += '<section class="card"><div class="label" style="margin-bottom:10px">Move spending money</div><div class="seg" role="group" aria-label="Move spending money"><button data-act="set-move" data-v="week" aria-pressed="' + (moveEvery() === "week") + '">Weekly</button><button data-act="set-move" data-v="month" aria-pressed="' + (moveEvery() === "month") + '">Monthly</button><button data-act="set-move" data-v="none" aria-pressed="' + (moveEvery() === "none") + '">I decide</button></div><p class="small muted" style="margin:10px 0 0">Recommended. Only the money you meant to spend is within reach. Spending is tracked either way.</p></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Appearance</div><div class="seg" role="group" aria-label="Appearance"><button data-act="set-theme" data-v="light" aria-pressed="' + (theme === "light") + '">Light</button><button data-act="set-theme" data-v="dark" aria-pressed="' + (theme === "dark") + '">Dark</button></div></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Feedback and privacy</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="sheet" data-v="feedback">Send feedback</button><button class="btn ghost" data-act="sheet" data-v="privacy">Privacy</button></div></section>';
@@ -1273,7 +1347,7 @@ function checkPairs(diffs){ var neg = diffs.filter(function(d){ return d.diff < 
 function checkRemaining(x){ var d = x.diffs.map(function(z){ return {acct:z.acct, diff:z.diff, exp:z.exp}; });
   (x.pairs || []).forEach(function(pr){ if (pr.off) return; d.forEach(function(z){ if (z.acct === pr.from) z.diff += pr.amount; if (z.acct === pr.to) z.diff -= pr.amount; }); });
   return d.filter(function(z){ return Math.abs(z.diff) >= 100; }); }
-document.addEventListener("change", function(e){ var ie = e.target; if (V.imp && V.imp.p && ie && (ie.id === "imp-acct" || ie.id === "imp-from")){ if (ie.id === "imp-acct") V.imp.acct = ie.value; else if (ie.value) V.imp.from = S.started && ie.value < S.started ? S.started : ie.value; render(); return; } });
+document.addEventListener("change", function(e){ var ie = e.target; if (V.imp && V.imp.p && ie && (ie.id === "imp-acct" || ie.id === "imp-from")){ if (ie.id === "imp-acct") V.imp.acct = ie.value; else if (ie.value) V.imp.from = ie.value; V.imp.confirm = false; render(); return; } });
 document.addEventListener("change", function(e){ var el = e.target; if (!el.classList || !el.classList.contains("cr-mode")) return; var i = el.getAttribute("data-i"), m = el.value;
   Array.prototype.forEach.call(document.querySelectorAll('.cr-b[data-i="' + i + '"]'), function(n){ n.style.display = m === "spend" ? "" : "none"; }); Array.prototype.forEach.call(document.querySelectorAll('.cr-a[data-i="' + i + '"]'), function(n){ n.style.display = m === "move" ? "" : "none"; }); });
 function acctOptions(sel){ return S.accounts.map(function(a){ return '<option value="' + a.id + '"' + (a.id === sel ? ' selected' : '') + '>' + h(a.name) + '</option>'; }).join(""); }
@@ -1513,7 +1587,7 @@ function renderSheet(){
     return sheetWrap("Up next", upNext().map(function(n){ return '<div class="card next' + (n.alert ? ' alert' : '') + '" style="margin-bottom:10px"><div class="txt"><b>' + h(n.t) + '</b><span>' + h(n.s) + '</span></div>' + nextBtns(n) + '</div>'; }).join("") +
       (sk.length ? '<div class="label" style="margin:18px 0 8px">Skipped</div>' + sk.map(function(d){ return '<div class="card next" style="margin-bottom:10px"><div class="txt"><b>' + h(d.t) + '</b><span>' + h(d.s) + '</span></div><div class="nbtns"><button class="btn primary" data-act="skip-undo" data-id="' + d.key + '">' + d.btn + '</button></div></div>'; }).join("") : ''));
   }
-  if (s.type === "close-view"){
+  if (s.type === "close-view"){ if (!S.close) return sheetWrap("Last cycle", '<p class="muted">Nothing to show yet.</p>', {cancel:"Close"});
     return sheetWrap(closeLabel() + " closed", '<div class="card" style="padding:4px 16px">' + S.close.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div>' + (S.close.earlier || []).map(function(e){ return '<div class="label" style="margin:14px 0 6px">' + h(e.label) + '</div><div class="card" style="padding:4px 16px">' + e.lines.map(function(l){ return '<div class="kv"><span>' + h(l) + '</span></div>'; }).join("") + '</div>'; }).join("") + '<p class="small muted" style="margin-top:12px">Spending leftovers move to ' + h(sweepTarget() ? sweepTarget().name : "savings") + '. Savings pots keep their balance. Unpaid bills carry over.</p><div style="display:flex;gap:10px;margin-top:14px"><button class="btn primary" style="flex:1" data-act="close-ok">Got it</button>' + (S.close.snapshot ? '<button class="btn ghost" data-act="close-undo">Undo</button>' : '') + '</div>');
   }
   if (s.type === "backup"){
@@ -1785,7 +1859,7 @@ function cleanBackup(o){ if (!o || typeof o !== "object" || !Array.isArray(o.bud
 function applyRestore(o){ var c = cleanBackup(o); if (!c){ toast("That does not look like a KoboCTRL backup."); return; }
   snap(); S = normalise(c); S.setupDone = true; if (!S.monthKey) S.monthKey = cyc(); if (!S.started) S.started = today(); upgrade(); closeSheet(); V.tab = "plan"; save(); toast("Backup restored.", true); }
 function backupText(){ var o = JSON.parse(JSON.stringify(S)); if (o.close) o.close.snapshot = null; o.app = "KoboCTRL"; o.appVersion = VERSION; o.savedAt = new Date().toISOString(); return JSON.stringify(o); }
-function closeSheet(){ var bk = V.sheet && V.sheet.data && V.sheet.data.back; V.sheet = bk ? {type:bk, data:{}} : null; }
+function closeSheet(){ var bk = V.sheet && V.sheet.data && V.sheet.data.back, rt = V.sheet && V.sheet.data && V.sheet.data.ret; V.sheet = bk ? {type:bk, data:rt || {}} : null; }
 function openDeferred(id){ if (id === "dfHH") openSheet("hh-setup"); else if (id === "dfGoal") openSheet("edit-budget", {id:"", preset:"goal"}); else if (id === "dfBiz") openSheet("edit-budget", {id:"", preset:"biz"});
   else if (id === "dfEm"){ var fl2 = S.budgets.filter(function(b){ return b.kind === "floor" && !b.retired; })[0]; if (fl2) openSheet("edit-budget", {id:fl2.id}); } }
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
@@ -1800,7 +1874,13 @@ document.addEventListener("click", function(e){
   switch (act){
     case "tab": V.tab = v; V.sheet = null; window.scrollTo(0, 0); break;
     case "stmt-pick": { var inp = document.createElement("input"); inp.type = "file"; inp.accept = ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; inp.onchange = function(){ if (inp.files && inp.files[0]) stmtLoad(inp.files[0]); }; inp.click(); break; }
-    case "stmt-go": { if (!V.imp || !V.imp.p) break; var made = applyStmt(V.imp), left0 = unsortedRows().length; V.imp = null; closeSheet(); if (left0) { openSheet("feed", {tab:"sort"}); } toast(made ? "Imported " + made.toLocaleString("en-NG") + " rows." : "Nothing new to import.", !!made); break; }
+    case "stmt-go": { var im0 = V.imp; if (!im0 || !im0.p) break; var pl0 = stmtPlan(im0);
+      if (v === "review" || (!im0.confirm && pl0.needsReview)){ im0.confirm = true; break; }
+      if (!saveBackupFile("before-import")){ toast("A backup file could not be saved, so nothing was imported."); break; }
+      var made = applyStmt(im0, {correct: v === "fix"}), conv = im0.res ? im0.res.conv : 0, left0 = unsortedRows().length; V.imp = null; closeSheet(); if (left0) { openSheet("feed", {tab:"sort"}); }
+      toast(made ? "Imported " + made.toLocaleString("en-NG") + " rows." + (conv > 0 ? " " + naira(conv) + " came out of Leftovers." : "") : "Nothing new to import.", !!made); break; }
+    case "stmt-back": if (V.imp) V.imp.confirm = false; break;
+    case "feed-add-account": openSheet("edit-account", {id:"", back:"feed-row", ret:{i:id, mode:V.sheet.data.mode || "own", back:"feed"}}); break;
     case "feed-list": openSheet("feed", {tab:"sort"}); break;
     case "feed-tab": V.sheet.data.tab = v === "all" ? "all" : "sort"; break;
     case "feed-open": openSheet("feed-row", {i:id, back:"feed"}); break;
@@ -1981,9 +2061,9 @@ document.addEventListener("click", function(e){
     case "del-budget": snap(); S.budgets = S.budgets.filter(function(b){ return b.id !== id; }); S.quick = S.quick.filter(function(q){ return q.budgetId !== id; }); closeSheet(); save(); toast("Budget deleted.", true); break;
     case "edit-account": openSheet("edit-account", {id:id}); break;
     case "save-account": { var an = val("a-name").trim(); if (!an){ toast("Give it a name."); break; } snap(); var ao = id ? A(id) : {id:uid()};
-      ao.name = an; ao.role = val("a-role"); ao.start = parseAmt(val("a-start")); if (!id) S.accounts.push(ao); closeSheet(); save(); toast("Saved.", true); break; }
+      ao.name = an; ao.role = val("a-role"); ao.start = parseAmt(val("a-start")); if (!id) S.accounts.push(ao); if (!id && V.sheet.data.ret) V.sheet.data.ret.pick = ao.id; closeSheet(); save(); toast("Saved.", true); break; }
     case "tx": openSheet("tx", {id:id}); break;
-    case "del-tx": { var dtx = S.tx.filter(function(z){ return z.id === id; })[0]; if (dtx && dtx.type === "in" && !dtx.opening && toAssign() - dtx.amount <= -100){ openSheet("del-in", {id:id}); break; }
+    case "del-tx": { var dtx = S.tx.filter(function(z){ return z.id === id; })[0]; if (dtx && dtx.type === "in" && !dtx.opening && toAssign() + linkedAlloc(dtx.id) - dtx.amount <= -100){ openSheet("del-in", {id:id}); break; }
       snap(); S.tx = S.tx.filter(function(t){ return t.id !== id; }); dropFeedFor(id); closeSheet(); save(); toast("Entry deleted.", true); break; }
     case "del-in-go": { snap(); S.tx = S.tx.filter(function(t){ return t.id !== id; }); dropFeedFor(id); var un = v === "undo" ? unassign() : 0; closeSheet(); save(); toast(un ? "Deleted. " + naira(un) + " of the split was taken back." : "Deleted.", true); break; }
     case "unassign": { snap(); var ud = unassign(); save(); toast(naira(ud) + " taken back from your budgets.", true); break; }
@@ -2043,11 +2123,13 @@ document.addEventListener("keydown", function(e){ if (e.key === "Escape" && V.sh
 
 /* ---------- Start ---------- */
 applyTheme();
-S = load();
-if (S.setupDone){ var up = upgrade(), ch = monthClose(); if (checkStreak() || ch || up) save(); }
-if ("serviceWorker" in navigator){ try { var hadSW = !!navigator.serviceWorker.controller; navigator.serviceWorker.addEventListener("controllerchange", function(){ if (hadSW && !window.__reloaded){ window.__reloaded = true; location.reload(); } }); navigator.serviceWorker.register("sw.js").catch(function(){}); } catch(e7){} }
-render();
-document.addEventListener("visibilitychange", function(){ if (document.visibilityState === "visible" && S.setupDone){ var c2 = monthClose(); if (checkStreak() || c2) save(); render(); } });
+bootState().then(function(){
+  if (S.setupDone){ var up = upgrade(), ch = monthClose(); if (checkStreak() || ch || up) save(); }
+  if ("serviceWorker" in navigator){ try { var hadSW = !!navigator.serviceWorker.controller; navigator.serviceWorker.addEventListener("controllerchange", function(){ if (hadSW && !window.__reloaded){ window.__reloaded = true; location.reload(); } }); navigator.serviceWorker.register("sw.js").catch(function(){}); } catch(e7){} }
+  render();
+  if (STORE.note) toast(STORE.note);
+  document.addEventListener("visibilitychange", function(){ if (document.visibilityState === "visible" && S.setupDone){ var c2 = monthClose(); if (checkStreak() || c2) save(); render(); } });
+});
 </script>
 </body>
 </html>

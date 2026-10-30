@@ -1,0 +1,23 @@
+const { chromium } = require('playwright');
+(async()=>{const b=await chromium.launch();const ctx=await b.newContext({viewport:{width:390,height:844},hasTouch:true});const p=await ctx.newPage();const errs=[];p.on('pageerror',e=>errs.push(e.message));
+await p.goto('http://localhost:8765/index.html');await p.evaluate(()=>localStorage.clear());await p.reload();await require('./lib.js').ready(p);
+const click=async s=>{await p.click(s);await p.waitForTimeout(80);};
+await click('[data-act="setup-next"]');await click('[data-act="intro-skip"]');await click('[data-act="pick-source"][data-v="salary"]');await click('[data-act="setup-next"]');
+console.log('note hidden at start:',await p.$eval('#s-nextnote',e=>e.hidden));
+const d=await p.evaluate(()=>addDays(today(),20));await p.fill('#s-next',d);await p.waitForTimeout(80);
+console.log('note:',await p.$eval('#s-nextnote',e=>e.textContent));
+await p.fill('#s-inc','250000');await click('[data-act="setup-next"]');
+await p.fill('#s-appb-0','182400');await p.fill('#s-appb-1','24000');
+console.log('total live:',await p.textContent('#s-total'));
+await click('[data-act="app-add"]');console.log('total after add:',await p.textContent('#s-total'));
+await p.fill('#s-app-0','Moniepoint');await click('[data-act="setup-next"]');
+await p.fill('#s-food','2000');await click('[data-act="daily-add"]');await click('[data-act="daily-add"]');
+console.log('food kept after add:',await p.inputValue('#s-food'),'extras',await p.$$eval('[id^=s-dxn-]',e=>e.length));
+await p.fill('#s-dxn-0','Laundry');await p.fill('#s-dxa-0','4000');await p.click('label:has(input[name="s-dxp-0"][value="week"]) span');
+await p.fill('#s-dxn-1','Haircut');await p.fill('#s-dxa-1','3000');await p.click('label:has(input[name="s-dxp-1"][value="month"]) span');
+await click('[data-act="setup-next"]');await click('[data-act="setup-next"]');
+const fit=await p.textContent('.q');console.log('screen:',fit);
+if(!/fits/i.test(fit)) {}
+await click('[data-act="setup-next"]').catch(()=>{});
+console.log('budgets:',await p.evaluate(()=>S.budgets.filter(b=>b.kind==='spend').map(b=>b.name+'/'+b.period+'/'+b.amount)));
+console.log('ERRORS',errs.join('|')||'none');await b.close();})();

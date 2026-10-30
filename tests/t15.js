@@ -1,0 +1,72 @@
+const { chromium } = require('playwright');
+(async()=>{
+const b=await chromium.launch();const ctx=await b.newContext({viewport:{width:390,height:844},hasTouch:true});const p=await ctx.newPage();const errs=[];p.on('pageerror',e=>errs.push(e.message));
+await p.goto('http://localhost:8765/index.html');
+await p.evaluate(()=>{localStorage.clear();});await p.reload();await require('./lib.js').ready(p);
+const click=async(sel)=>{await p.click(sel);await p.waitForTimeout(80);};
+const txt=async()=>(await p.textContent('#app')).replace(/\s+/g,' ').trim();
+console.log('1 brand:',(await txt()).slice(0,60));
+await click('[data-act="setup-next"]');
+console.log('2 intro skip present:',!!(await p.$('[data-act="intro-skip"]')));
+await click('[data-act="intro-skip"]');
+console.log('3 source screen:',(await txt()).slice(0,170));
+await click('[data-act="pick-source"][data-v="salary"]');
+console.log('hustle tick shown:',!!(await p.$('[data-act="toggle-hustle"]')));
+await click('[data-act="toggle-hustle"]');
+await click('[data-act="setup-next"]');
+console.log('4 next:',(await txt()).slice(0,200));
+await p.fill('#s-inc','250000');
+await p.check('input[name="s-every"][value="month"]');
+const nd=await p.evaluate(()=>addDays(today(),20));
+await p.fill('#s-next',nd);
+await click('[data-act="setup-next"]');
+console.log('5 accounts:',(await txt()).slice(0,200),'| rows',await p.$$eval('.arow',e=>e.length));
+await p.fill('#s-app-0','Moniepoint');await p.fill('#s-appb-0','182400');
+await click('[data-act="app-add"]');
+console.log('rows after add',await p.$$eval('.arow',e=>e.length),'| first kept:',await p.inputValue('#s-app-0'),await p.inputValue('#s-appb-0'));
+await p.fill('#s-app-1','Opay');await p.fill('#s-appb-1','24000');
+await p.fill('#s-app-2','Cash');await p.fill('#s-appb-2','6500');
+await click('[data-act="setup-next"]');
+console.log('6 daily:',(await txt()).slice(0,200));
+await p.fill('#s-food','2000');await p.fill('#s-transport','1000');await p.fill('#s-data','10000');
+await p.check('input[name="s-data-per"][value="month"]');
+await click('[data-act="setup-next"]');
+console.log('7 fixed:',(await txt()).slice(0,300));
+await p.fill('#s-rent','720000');await p.fill('#s-fees','80000');await p.fill('#s-family','25000');await p.fill('#s-bizcost','15000');
+const rd=await p.evaluate(()=>addMonthsTo(today().slice(0,7)+'-01',3).slice(0,7));
+await p.fill('#s-rentdue',rd);await p.fill('#s-feesdue',rd);
+await click('[data-act="setup-next"]');
+console.log('8 fit:',(await txt()).slice(0,260));
+await click('[data-act="setup-next"]');
+console.log('9 built:',await p.evaluate(()=>JSON.stringify({done:S.setupDone,accts:S.accounts.map(a=>a.name+':'+a.start+':'+a.role),budgets:S.budgets.map(b=>b.name+'/'+b.kind+'/'+(b.period||'')+'/'+b.amount+(b.biz?'/biz':'')),next:S.nextMoney,hustle:S.hustle})));
+console.log('--- HOME ---');
+console.log((await txt()).slice(0,900));
+await p.screenshot({path:'shots/home1.png',fullPage:true});
+// log a spend and re-check
+await p.evaluate(()=>{var f=S.budgets.filter(b=>b.name==='Food')[0];S.tx.push({id:uid(),type:'out',budgetId:f.id,amount:1200,note:'lunch',date:today(),at:Date.now()});save();});
+console.log('--- HOME after spend ---');console.log((await txt()).slice(0,700));
+await p.screenshot({path:'shots/home2.png',fullPage:true});
+// deferred cards present
+console.log('upNext titles:',await p.evaluate(()=>upNext().map(i=>i.t)));
+// household flow
+await p.evaluate(()=>{S.dismissed={};save();});
+await p.evaluate(()=>{openSheet('hh-setup');render();});
+await p.fill('#s-hh-0','5000');await p.fill('#s-hh-1','3000');
+await click('[data-act="save-hh"]');
+console.log('hh budgets:',await p.evaluate(()=>S.budgets.filter(b=>b.parent==='Household and personal').map(b=>b.name+':'+b.amount)));
+// emergency / goal / biz via defer-open
+await p.evaluate(()=>{var f=S.budgets.filter(b=>b.kind==='floor')[0]; if(!f){f={id:uid(),name:'Emergency money',group:'Savings',kind:'floor',amount:0,start:0,order:7,account:S.accounts[0].id,created:today()};S.budgets.push(f);}openSheet('edit-budget',{id:f.id});render();});
+console.log('emergency sheet ok:',!!(await p.$('#e-start')));
+await p.evaluate(()=>{closeSheet();openSheet('edit-budget',{id:'',preset:'biz'});render();});
+console.log('biz sheet name:',await p.inputValue('#e-name'),'group',await p.inputValue('#e-group'));
+await p.fill('#e-amt','5000');await click('[data-act="save-budget"]');
+console.log('biz saved:',await p.evaluate(()=>S.budgets.filter(b=>b.biz).map(b=>b.name+'/'+b.biz)));
+// feedback
+await p.evaluate(()=>{V.tab='settings';closeSheet();render();});
+await click('[data-act="sheet"][data-v="feedback"]');
+await p.fill('#fb-text','The number on Home was lower than my bank balance.');
+const url=await p.evaluate(()=>feedbackMail('Hello',true));console.log('mailto:',decodeURIComponent(url));
+console.log('no amounts in usage:',!/\d{4,}/.test(decodeURIComponent(url).split('---')[1]||''));
+await p.evaluate(()=>{window.__nav=null;});
+console.log('ERRORS',errs.join('|')||'none');
+await b.close();})();

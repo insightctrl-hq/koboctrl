@@ -252,7 +252,7 @@ button.covered{font-family:inherit;color:inherit;cursor:pointer}
 <div id="app"></div>
 <script>
 "use strict";
-var VERSION = "1.6";
+var VERSION = "1.7";
 var KEY = "koboctrl-v1";
 
 /* ---------- Helpers ---------- */
@@ -323,6 +323,13 @@ function B(id){ for (var i = 0; i < S.budgets.length; i++) if (S.budgets[i].id =
 function A(id){ for (var i = 0; i < S.accounts.length; i++) if (S.accounts[i].id === id) return S.accounts[i]; return null; }
 function acctByRole(r){ for (var i = 0; i < S.accounts.length; i++) if (S.accounts[i].role === r) return S.accounts[i]; return S.accounts[0]; }
 function isPot(b){ return b.kind === "pot" || b.kind === "floor"; }
+/* How often spending money moves to the spending account: "week" (default), "month", or "none" when the person manages it alone. */
+function moveEvery(){ var m = S.settings && S.settings.moveEvery; return m === "month" || m === "none" ? m : "week"; }
+function moveKey(){ return moveEvery() === "month" ? "m" + cyc() : weekStart(); }
+function moveFlags(){ return S.flags[moveKey()] || {}; }
+function moveAmount(){ if (moveEvery() === "week") return weeklyAllowance(); var sp = acctByRole("spend"), t = 0;
+  S.budgets.forEach(function(b){ if (b.kind !== "spend" || b.paused || b.retired || b.account !== sp.id) return; t += Math.max(0, budgetView(b).leftMonth); });
+  return round100(t); }
 function sameAcct(){ var i = acctByRole("income"), sp = acctByRole("spend"); return !!(i && sp && i.id === sp.id); }
 function protectedPot(b){ return !!(b && isPot(b) && !b.sweep && !b.reward); }
 function sumTx(fn){ var t = 0; for (var i = 0; i < S.tx.length; i++) if (fn(S.tx[i])) t += S.tx[i].amount; return t; }
@@ -579,11 +586,11 @@ function weekScore(ws){
   var ev = Math.min(1, logged / 3), f = S.flags[ws] || {}, parts = {
     log: days ? Math.round(30 * logged / Math.max(days, 3)) : 0,
     budgets: Math.round(Math.max(0, 30 - 10 * overs - 5 * unrec) * ev),
-    transfer: f.transfer && f.check && !f.mismatch ? 15 : 0,
+    transfer: (moveEvery() === "month" ? (S.flags["m" + cycOf(ws)] || {}).transfer : f.transfer) && f.check && !f.mismatch ? 15 : 0,
     check: f.check ? 15 : 0,
     locks: broke ? 0 : Math.round(10 * ev) };
-  /* With one account there is no Monday transfer to make, so the other 85 points are scaled to 100. */
-  if (sameAcct()){ parts.transfer = null; parts.total = Math.round((parts.log + parts.budgets + parts.check + parts.locks) * 100 / 85); }
+  /* With one account, or when the person manages the move alone, there is no transfer to score, so the other 85 points are scaled to 100. */
+  if (sameAcct() || moveEvery() === "none"){ parts.transfer = null; parts.total = Math.round((parts.log + parts.budgets + parts.check + parts.locks) * 100 / 85); }
   else parts.total = parts.log + parts.budgets + parts.transfer + parts.check + parts.locks;
   return parts;
 }
@@ -728,6 +735,7 @@ function envelopeHeld(a){ var t = 0;
   return t; }
 /* Spending money still needed in the spending account from today to the end of the week. */
 function spendTopUp(){ var sp = acctByRole("spend"), need = 0, dl = bwDaysLeft();
+  if (moveEvery() === "month") return Math.max(0, round100(moveAmount() - Math.max(0, acctBalance(sp) - acctFloor(sp))));
   S.budgets.forEach(function(b){ if (b.kind !== "spend" || b.paused || b.retired || b.account !== sp.id) return; var v = budgetView(b), leftC = Math.max(0, v.leftMonth), add;
     if (b.period === "day") add = Math.max(0, v.left) + b.amount * Math.max(0, dl - 1); else if (b.period === "week") add = Math.max(0, v.left); else add = round100(b.amount * dl / cycDays(cyc()));
     need += Math.min(add, leftC); });
@@ -772,7 +780,7 @@ function upNext(){
   S.repay.forEach(function(r){ if (r.paid < r.total){ var b = B(r.budgetId); items.push({t:"Repay " + (b ? b.name : "pot"), s:naira(Math.min(r.weekly, r.total - r.paid)) + " this week, " + naira(r.total - r.paid) + " left in total.", act:"repay", id:r.id, btn:"Pay", alert:true}); } });
   S.budgets.forEach(function(b){ if (b.kind !== "bill" || b.paused || !b.dueDay || firstDueNextMonth(b)) return; var v = budgetView(b); if (v.isPaid) return;
     var diff = b.dueDay - dom; if (diff <= 3) items.push({t:b.name + (diff < 0 ? " is overdue" : diff === 0 ? " is due today" : " is due in " + diff + (diff === 1 ? " day" : " days")), s:naira(b.amount - v.paid) + " from " + (A(b.account) || {}).name + ".", act:"pay-bill", id:b.id, btn:"Paid", alert:diff <= 0}); });
-  if (!f.transfer && S.accounts.length > 1 && !sameAcct()){ var wa = weeklyAllowance(); if (wa > 0) items.push({t:"Move this week's money", s:naira(wa) + " from " + acctByRole("income").name + " to " + acctByRole("spend").name + ".", act:"transfer", btn:"Done", alert:d === 0}); }
+  if (moveEvery() !== "none" && !moveFlags().transfer && !moveFlags().skip && S.accounts.length > 1 && !sameAcct()){ var wa = moveAmount(); if (wa > 0) items.push({t:moveEvery() === "month" ? "Move this month's money" : "Move this week's money", s:naira(wa) + " from " + acctByRole("income").name + " to " + acctByRole("spend").name + ".", act:"transfer", btn:"Done", act2:"transfer-skip", btn2:"Skip", alert:moveEvery() === "week" && d === 0}); }
   if (d >= 4 && !f.check) items.push({t:"Friday balance check", s:"Two minutes. Open your apps and type what each one holds.", act:"check", btn:"Start", alert:true});
   var dz = S.dismissed || {};
   deferDefs().forEach(function(d){ if (d.show && !dz[d.key]) items.push({t:d.t, s:d.s, act:"defer-open", id:d.key, btn:d.btn, act2:"dismiss-rem", btn2:"Skip"}); });
@@ -794,7 +802,7 @@ var THEME_KEY = "koboctrl-theme", theme = (function(){ try { return localStorage
 function applyTheme(){ if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark"); else document.documentElement.removeAttribute("data-theme"); var m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute("content", theme === "dark" ? "#0A100D" : "#F3F5F4"); }
 function render(){
   var scr = S.setupDone ? V.tab : "s" + V.setup.step; if (scr !== V.scr){ V.scr = scr; window.scrollTo(0, 0); }
-  if (!S.setupDone){ $("#app").innerHTML = renderSetup() + (V.toast ? '<div class="toast" role="status">' + h(V.toast.msg) + '</div>' : ''); wireSlides(); fmtInputs(); wireSetup(); focusFirst(); return; }
+  if (!S.setupDone){ $("#app").innerHTML = renderSetup() + (V.toast ? '<div class="toast" role="status" data-act="toast-x">' + h(V.toast.msg) + '</div>' : ''); wireSlides(); fmtInputs(); wireSetup(); focusFirst(); return; }
   var body = V.tab === "spend" ? renderSpend() : V.tab === "goals" ? renderSavings() : V.tab === "progress" ? renderProgress() : V.tab === "settings" ? renderSettings() : renderPlan();
   var tabs = [["plan","Plan"],["spend","Spend"],["goals","Savings"],["progress","Progress"],["settings","Settings"]].map(function(t){
     return '<button class="tab" data-act="tab" data-v="' + t[0] + '"' + (V.tab === t[0] ? ' aria-current="page"' : '') + '>' + IC[t[0]] + '<span>' + t[1] + '</span></button>'; }).join("");
@@ -802,7 +810,7 @@ function render(){
     (V.scenario ? '' : '<button class="fab" data-act="sheet" data-v="log" aria-label="Record money in or out">' + IC.plus + '</button>') +
     '<nav class="tabbar" aria-label="Main"><div class="in-bar">' + tabs + '</div></nav>' +
     (V.sheet ? renderSheet() : '') +
-    (V.toast ? '<div class="toast" role="status">' + h(V.toast.msg) + (V.toast.undo ? '<button data-act="undo">Undo</button>' : '') + '</div>' : '');
+    (V.toast ? '<div class="toast" role="status" data-act="toast-x">' + h(V.toast.msg) + (V.toast.undo ? '<button data-act="undo">Undo</button>' : '') + '</div>' : '');
   fmtInputs(); if (V.sheet) focusFirst();
 }
 /* Amount fields show commas as you type, so the zeros are easy to count. Counts and days stay plain. */
@@ -826,6 +834,7 @@ document.addEventListener("touchstart", function(e){ var sh = e.target.closest &
 document.addEventListener("touchmove", function(e){ if (!drag) return; drag.dy = Math.max(0, e.touches[0].clientY - drag.y); drag.sh.style.transform = "translateY(" + drag.dy + "px)"; }, {passive:true});
 document.addEventListener("touchend", function(){ if (!drag) return; var d = drag; drag = null; d.sh.style.transition = "transform .2s ease";
   if (d.dy > (sheetDirty(d.sh) ? 260 : 90)){ d.sh.style.transform = "translateY(100%)"; setTimeout(function(){ closeSheet(); render(); }, 190); } else d.sh.style.transform = ""; });
+document.addEventListener("input", function(e){ if (!V.sheet || V.sheet.type !== "withdraw" || e.target.id !== "f-amt") return; var wl = document.getElementById("wd-live"), wbx = B(V.sheet.data.id); if (wl && wbx) wl.textContent = withdrawNote(wbx, Math.min(parseAmt(e.target.value) || 0, potBalance(wbx))); });
 document.addEventListener("input", function(e){ var el = e.target; if (!isAmountInput(el)) return;
   var pos = el.selectionStart == null ? el.value.length : el.selectionStart, digitsBefore = el.value.slice(0, pos).replace(/[^0-9]/g, "").length, out = withCommas(el.value);
   if (out === el.value) return; el.value = out;
@@ -997,7 +1006,7 @@ function prefillAmt(b){ return b.period === "day" || b.kind === "refill" || !!b.
 function renderProgress(){
   var ws = weekStart(), sc = weekScore(ws), st = streakLen(), html = pageTop("Progress"), rp = rewardPot();
   html += '<div class="stack"><section class="card"><div class="label">This week’s discipline score</div><div class="score" style="margin:8px 0 12px"><span class="big num">' + sc.total + '</span><span class="muted" style="margin-bottom:10px">out of 100</span></div>' +
-    [["Logged every day", sc.log, 30], ["Stayed within budgets", sc.budgets, 30], ["Monday transfer", sc.transfer, 15], ["Friday balance check", sc.check, 15], ["Goals kept", sc.locks, 10]].filter(function(r){ return r[1] !== null; }).map(function(r){
+    [["Logged every day", sc.log, 30], ["Stayed within budgets", sc.budgets, 30], [moveEvery() === "month" ? "Monthly transfer" : "Weekly transfer", sc.transfer, 15], ["Friday balance check", sc.check, 15], ["Goals kept", sc.locks, 10]].filter(function(r){ return r[1] !== null; }).map(function(r){
       return '<div class="kv"><span>' + r[0] + '</span><span>' + r[1] + ' / ' + r[2] + '</span></div>'; }).join("") + '</section>';
   var weeks = []; for (var i = 5; i >= 0; i--){ var w = addDays(ws, -7 * i); weeks.push({w:w, s:i === 0 ? sc.total : (S.scoreWeeks[w] != null ? S.scoreWeeks[w] : null)}); }
   html += '<section class="card"><div class="label">Last six weeks</div><div class="weeks">' + weeks.map(function(x, i){
@@ -1016,11 +1025,12 @@ function renderSettings(){
     S.budgets.filter(function(b){ return !b.retired; }).map(function(b){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-simple" data-id="' + b.id + '"><span><b style="font-weight:600">' + h(b.name) + '</b><br><span class="small muted">' + h(b.group) + ' · ' + kindLabel(b) + '</span></span><span class="num" style="font-size:19px">' + naira(b.amount) + '</span></button>'; }).join("") + '</section>';
   html += '<section class="card group"><div class="group-head"><span class="label">Accounts</span><button class="link" data-act="edit-account" data-id="">Add</button></div>' +
     S.accounts.map(function(a){ return '<button class="item" style="display:flex;justify-content:space-between;gap:10px;width:100%;padding:12px 16px;background:transparent;border:0;border-top:1px solid var(--line);text-align:left;cursor:pointer" data-act="edit-account" data-id="' + a.id + '"><span><b style="font-weight:600">' + h(a.name) + '</b><br><span class="small muted">' + roleLabel(a.role) + (a.role === "save" ? ' · pots hold ' + naira(envelopeHeld(a)) : '') + '</span>' + (a.role === "save" && Math.abs(acctBalance(a) - envelopeHeld(a)) >= 100 ? '<br><span class="small" style="color:var(--red)">' + (acctBalance(a) > envelopeHeld(a) ? naira(acctBalance(a) - envelopeHeld(a)) + ' more than your pots' : naira(envelopeHeld(a) - acctBalance(a)) + ' less than your pots') + '</span>' : '') + '</span><span class="num" style="font-size:19px">' + naira(acctBalance(a)) + '</span></button>'; }).join("") + '</section>';
+  if (S.accounts.length > 1 && !sameAcct()) html += '<section class="card"><div class="label" style="margin-bottom:10px">Move spending money</div><div class="seg" role="group" aria-label="Move spending money"><button data-act="set-move" data-v="week" aria-pressed="' + (moveEvery() === "week") + '">Weekly</button><button data-act="set-move" data-v="month" aria-pressed="' + (moveEvery() === "month") + '">Monthly</button><button data-act="set-move" data-v="none" aria-pressed="' + (moveEvery() === "none") + '">I decide</button></div><p class="small muted" style="margin:10px 0 0">Recommended. Only the money you meant to spend is within reach. Spending is tracked either way.</p></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Appearance</div><div class="seg" role="group" aria-label="Appearance"><button data-act="set-theme" data-v="light" aria-pressed="' + (theme === "light") + '">Light</button><button data-act="set-theme" data-v="dark" aria-pressed="' + (theme === "dark") + '">Dark</button></div></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Feedback and privacy</div><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="sheet" data-v="feedback">Send feedback</button><button class="btn ghost" data-act="sheet" data-v="privacy">Privacy</button></div></section>';
   html += '<section class="card"><div class="label" style="margin-bottom:10px">Your data</div><p class="small muted">Everything stays on this phone. Back up every week, and before changing phones.</p><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" data-act="backup">Back up</button><button class="btn ghost" data-act="sheet" data-v="restore">Restore</button></div>' +
     (S.close ? '<div class="kv" style="margin-top:14px"><span>Last month closed</span><span>' + h(monthName(S.close.month)) + '</span></div>' : '') + '</section>';
-  html += '<section class="card"><div class="label" style="margin-bottom:10px">How it works</div><p class="small muted">Money that arrives waits until you split it. The split fills your budgets in order, from daily needs down to savings with fixed dates. Save first comes out before anything else. What is left goes to your goals, one at a time in queue order, then to Leftovers.</p><p class="small muted">Each Monday, move the week’s spending money to your spending account. Each Friday, enter what your accounts really hold, so nothing slips through. When a new cycle starts on payday (or on the 1st, with no payday set), money left in spending budgets moves to your goals, then Leftovers. Refill money stays until you buy the item. Savings pots keep their balance.</p><p class="small muted">Going over a day or week budget is never fined. The extra simply comes off the next day or week.</p><p class="small muted">KoboCTRL never holds your money. To truly protect savings, lock them in your savings app. Taking money out of a goal here starts a short countdown, so you can think first.</p></section>';
+  html += '<section class="card"><div class="label" style="margin-bottom:10px">How it works</div><p class="small muted">Money that arrives waits until you split it. The split fills your budgets in order, from daily needs down to savings with fixed dates. Save first comes out before anything else. What is left goes to your goals, one at a time in queue order, then to Leftovers.</p><p class="small muted">If you keep a separate spending account, move its money across each week or month, as you choose in Settings. Each Friday, enter what your accounts really hold, so nothing slips through. When a new cycle starts on payday (or on the 1st, with no payday set), money left in spending budgets moves to your goals, then Leftovers. Refill money stays until you buy the item. Savings pots keep their balance.</p><p class="small muted">Going over a day or week budget is never fined. The money is spent, so the days after it share what the month still holds.</p><p class="small muted">KoboCTRL never holds your money. To truly protect savings, lock them in your savings app. Taking money out of a savings pot here shows what it costs the goal first.</p></section>';
   if (S.nextMoney) html += '<section class="card"><div class="label" style="margin-bottom:10px">Payday reminders</div><p class="small muted">Adds your payday to your phone calendar, with reminders the day before, on the day and the day after.</p><button class="btn ghost" data-act="pay-ics">Add to my calendar</button></section>';
   html += '<section class="card"><button class="btn danger block" data-act="sheet" data-v="clear">Clear everything</button><p class="small muted" style="margin:12px 0 0;text-align:center">KoboCTRL ' + VERSION + ' · Powered by InsightCTRL</p></section>';
   return html + '</div>';
@@ -1119,8 +1129,10 @@ function renderSheet(){
   }
   if (s.type === "withdraw"){
     var wb = B(x.id), bal = potBalance(wb);
-    return sheetWrap("Withdraw from " + wb.name, '<p class="muted">' + naira(bal) + ' available. The money goes back to be split again.</p><label class="sr" for="f-amt">Amount</label><input class="money" id="f-amt" inputmode="numeric" placeholder="₦0" data-autofocus><label class="f" for="f-why">Reason</label><input class="t" id="f-why" placeholder="What is this for?"><div style="margin-top:18px"><button class="btn gold block" data-act="withdraw" data-id="' + wb.id + '">Withdraw</button></div>', {cancel:"Cancel"});
+    return sheetWrap("Withdraw from " + wb.name, '<p class="muted">' + naira(bal) + ' available. The money goes back to be split again.</p><label class="sr" for="f-amt">Amount</label><input class="money" id="f-amt" inputmode="numeric" placeholder="₦0" data-autofocus><label class="f" for="f-why">Reason</label><input class="t" id="f-why" placeholder="What is this for?"><p class="note" id="wd-live" style="margin-top:12px">' + h(withdrawNote(wb, 0)) + '</p><div style="margin-top:18px"><button class="btn gold block" data-act="withdraw" data-id="' + wb.id + '">Withdraw</button></div>', {cancel:"Cancel"});
   }
+  if (s.type === "unlock-first"){ var ufb = B(x.id), ufa = (A(ufb.account) || {}).name || "your savings app";
+    return sheetWrap(ufb.name + " is locked", '<p class="muted">The money is locked in ' + h(ufa) + ', out of reach. Unlock it there first. Then record the move here.</p><div style="display:flex;flex-direction:column;gap:10px"><button class="btn gold block" data-act="unlock-done" data-id="' + ufb.id + '">I\u2019ve unlocked it</button><button class="btn ghost block" data-act="close-sheet">Keep it locked</button></div>', {cancel:"Close"}); }
   if (s.type === "check"){
     var inner4 = '<p class="muted">Open each banking app and type what it really shows. The app compares it with what it expects.</p>' + S.accounts.map(function(a){
       return '<label class="f" for="cb-' + a.id + '">' + h(a.name) + ' <span style="font-weight:500">(expected ' + naira(acctBalance(a)) + ')</span></label><input class="t" id="cb-' + a.id + '" inputmode="numeric" placeholder="' + naira(acctBalance(a)) + '">'; }).join("") +
@@ -1228,9 +1240,8 @@ function renderSheet(){
   }
   if (s.type === "cooldown"){
     var rem = coolLeft(x), done = rem <= 0, total = x.secs * 1000, wbc = B(x.id);
-    var txt = x.kind === "over" ? overText(x) : breakText(wbc);
-    var btns = x.kind === "over" ? (done ? '<button class="btn primary block" data-act="over-log">Log it</button><button class="btn ghost block" data-act="cool-cancel">Don\u2019t buy it</button>' : '<button class="btn ghost block" data-act="cool-cancel">Don\u2019t buy it</button>')
-      : (done ? '<button class="btn gold block" data-act="cool-go">Take money out</button><button class="btn ghost block" data-act="cool-cancel">Keep it</button>' : '<button class="btn ghost block" data-act="cool-cancel">Keep it</button><button class="link" style="margin-top:4px" data-act="cool-go">I already took it out</button>');
+    var txt = overText(x);
+    var btns = done ? '<button class="btn primary block" data-act="over-log">Log it</button><button class="btn ghost block" data-act="cool-cancel">Don\u2019t buy it</button>' : '<button class="btn ghost block" data-act="cool-cancel">Don\u2019t buy it</button>';
     return sheetWrap(done ? "Still want to?" : "Take a moment", '<p class="muted" style="text-align:center">' + h(txt) + '</p><div class="cd"><div class="cd-wrap"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="ring-bg" cx="60" cy="60" r="54" fill="none" stroke-width="5"/><circle class="ring" id="cd-ring" cx="60" cy="60" r="54" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="339.29" stroke-dashoffset="' + (339.29 * (1 - rem / total)).toFixed(1) + '" transform="rotate(-90 60 60)"/></svg><div class="cd-time" id="cd-time" role="timer">' + mmss(rem) + '</div><div class="cd-sub">' + (done ? 'Done' : 'Cooldown') + '</div></div></div><div style="display:flex;flex-direction:column;gap:10px;align-items:stretch">' + btns + '</div>', {cancel:"Close"});
   }
   if (s.type === "break"){
@@ -1312,11 +1323,14 @@ function renderSheet(){
 function everySelect(id, n){ return '<select class="t" id="' + id + '">' + [[1, "Monthly"], [2, "2 months"], [3, "3 months"], [6, "6 months"], [12, "Yearly"]].map(function(o){ return '<option value="' + o[0] + '"' + (o[0] === +n ? ' selected' : '') + '>' + o[1] + '</option>'; }).join("") + '</select>'; }
 function coolLeft(x){ return Math.max(0, x.start + x.secs * 1000 - Date.now()); }
 function mmss(ms){ var t = Math.ceil(ms / 1000); return pad(Math.floor(t / 60)) + ":" + pad(t % 60); }
-function breakText(b){ if (!b) return ""; if (b.kind === "floor") return "This is your emergency money. Use it only for a real emergency.";
-  if (isGoal(b)) return "Taking money from " + b.name + " pushes its finish date back.";
-  return b.name + (b.targetDate ? " is due " + fmtMonth(b.targetDate) : "") + ". Taking money out puts that at risk."; }
+/* What taking x out of a savings pot does to it, shown live while the amount is typed. */
+function withdrawNote(b, x){ var bal = potBalance(b), after = Math.max(0, bal - x), tail = x > 0 ? " It also costs this week\u2019s Goals kept points." : "";
+  if (b.kind === "floor") return "Emergency money: use it only for a real emergency. It would hold " + naira(after) + " of " + naira(floorTarget()) + "." + tail;
+  if (isCommit(b) && b.targetDate && b.target){ var mo = Math.max(1, monthsUntil(b.targetDate)), now = commitAmt(b), next = Math.max(0, round100((b.target - (bal - funded(b) - x)) / mo));
+    return x > 0 ? "To be ready " + fmtMonth(b.targetDate) + ", " + b.name + " would need " + naira(next) + " a month instead of " + naira(now) + "." + tail : b.name + " needs " + naira(now) + " a month to be ready " + fmtMonth(b.targetDate) + ". Taking money out raises that."; }
+  return x > 0 ? b.name + " would hold " + naira(after) + (b.target ? " of " + naira(b.target) : "") + ". That pushes its finish date back." + tail : "Taking money out of " + b.name + " pushes its finish date back."; }
 function overText(x){ var b = B(x.bid); if (!b) return ""; if (b.kind === "refill"){ var rbl = Math.max(0, refillBal(b)); return "You have " + naira(rbl) + " set aside for " + b.name + ". This uses " + naira(x.amt - rbl) + " more than that."; } var v = budgetView(b), over = x.amt - Math.max(0, v.left), per = b.period === "day" ? "day" : b.period === "week" ? "week" : "month";
-  return b.name + " has " + naira(Math.max(0, v.left)) + " left. This puts it " + naira(over) + " over, and the extra comes off your next " + per + "."; }
+  return b.name + " has " + naira(Math.max(0, v.left)) + " left. This puts it " + naira(over) + " over" + (b.period === "month" ? "." : ", and the rest of the month shares the difference."); }
 /* Paying from a savings pot sends the money to its purpose. It needs no cooldown and breaks no lock. */
 function potSpendLog(lg){ var b = B(lg.bid); if (lg.amt > potBalance(b)){ toast("Only " + naira(potBalance(b)) + " is in " + b.name + "."); return; }
   snap(); S.tx.push({id:uid(), type:"potSpend", budgetId:b.id, amount:lg.amt, account:b.account, note:lg.note || "", date:lg.date || today(), at:Date.now()});
@@ -1387,7 +1401,7 @@ var INTRO = [
    art:'<div class="mini"><div class="l">Safe to spend today</div><div class="v">₦<span class="blank" style="width:120px"></span></div><div class="s">Food, transport and data included</div></div>'},
   {t:"All your money apps. One plan.", b:"Keep using your bank, OPay, Moniepoint, PiggyVest and Cowrywise. KoboCTRL tells every naira where to go. No bank login needed.",
    art:'<div class="mini-chips"><span>GTBank</span><span>OPay</span><span>Moniepoint</span><span>Kuda</span><span>PiggyVest</span><span>Cowrywise</span><span>PalmPay</span></div>'},
-  {t:"Two small habits a week.", b:"On Monday, move the week's spending money to your spending app. On Friday, type in what your apps hold, so nothing slips. KoboCTRL reminds you, and your score shows how you are doing.",
+  {t:"Two small habits.", b:"If you keep a separate spending app, move its money across each week or month. On Friday, type in what your apps hold, so nothing slips. KoboCTRL reminds you, and your score shows how you are doing.",
    art:'<div class="mini"><div class="l">This week</div><div class="v" style="font-size:22px">Mon · Fri</div><div class="s">Move money · Check balances</div></div>'}
 ];
 function goSlide(i){ var el = document.getElementById("slides"); if (!el) return; i = Math.max(0, Math.min(INTRO.length - 1, i)); el.scrollTo({left:i * el.clientWidth, behavior:"smooth"}); }
@@ -1529,7 +1543,7 @@ function monthsUntilFrom(k){ return monthsUntil(k); }
 
 /* ---------- Actions ---------- */
 var undoState = null;
-function toast(msg, undo){ V.toast = {msg:msg, undo:!!undo}; clearTimeout(toast.t); toast.t = setTimeout(function(){ V.toast = null; undoState = null; render(); }, undo ? 6000 : 2600); }
+function toast(msg, undo){ V.toast = {msg:msg, undo:!!undo}; clearTimeout(toast.t); toast.t = setTimeout(function(){ V.toast = null; undoState = null; render(); }, undo ? 4500 : 1800); }
 function snap(){ undoState = JSON.stringify(S); }
 function b64(buf){ var a = new Uint8Array(buf), out = ""; for (var i = 0; i < a.length; i++) out += String.fromCharCode(a[i]); return btoa(out); }
 function unb64(t){ var r = atob(t), a = new Uint8Array(r.length); for (var i = 0; i < r.length; i++) a[i] = r.charCodeAt(i); return a; }
@@ -1555,7 +1569,7 @@ function openDeferred(id){ if (id === "dfHH") openSheet("hh-setup"); else if (id
 function openSheet(type, data){ V.sheet = {type:type, data:data || {}}; }
 function val(id){ var el = document.getElementById(id); return el ? el.value : ""; }
 
-var SCN_BLOCK = ["refill-spend", "save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought", "pend-done", "floor-fix", "unassign", "del-in-go", "save-hh", "topup-from"];
+var SCN_BLOCK = ["refill-spend", "transfer-skip", "set-move", "save-log", "quick", "nospend", "plan-log", "log-in", "pay-bill", "transfer", "check", "check-run", "check-apply", "opening", "confirm-split", "split", "withdraw-open", "withdraw", "del-tx", "tx", "repay", "backup", "copy-backup", "download-backup", "do-restore", "do-clear", "topup", "over-log", "cool-go", "real-lock", "real-unlock", "cover", "close-undo", "pay-ics", "bought", "pend-done", "floor-fix", "unassign", "del-in-go", "save-hh", "topup-from"];
 document.addEventListener("click", function(e){
   var el = e.target.closest("[data-act]"); if (!el) return;
   if (el.getAttribute("data-act") === "close-sheet" && e.target.closest("[data-stop]") && !e.target.closest("button")) return;
@@ -1563,6 +1577,7 @@ document.addEventListener("click", function(e){
   if (V.scenario && (SCN_BLOCK.indexOf(act) >= 0 || (act === "sheet" && ["log", "split", "check", "clear", "restore", "backup"].indexOf(v) >= 0))){ toast("Apply or discard the scenario first."); render(); return; }
   switch (act){
     case "tab": V.tab = v; V.sheet = null; window.scrollTo(0, 0); break;
+    case "toast-x": clearTimeout(toast.t); V.toast = null; undoState = null; break;
     case "set-theme": theme = v === "dark" ? "dark" : "light"; try { localStorage.setItem(THEME_KEY, theme); } catch(e5){} applyTheme(); break;
     case "sheet": openSheet(v, el.getAttribute("data-b") ? {budgetId:el.getAttribute("data-b")} : {}); break;
     case "close-sheet": closeSheet(); break;
@@ -1589,8 +1604,7 @@ document.addEventListener("click", function(e){
     case "plan-log": { var pbx = B(id); if (!pbx) break; openSheet("log", {budgetId:id, amount:prefillAmt(pbx) ? String(pbx.amount) : ""}); break; }
     case "over-log": logOut(V.sheet.data); break;
     case "over-wait": openSheet("cooldown", Object.assign({}, V.sheet.data, {kind:"over", secs:60, start:Date.now()})); break;
-    case "cool-cancel": { var cx = V.sheet.data; closeSheet(); toast(cx.kind === "over" ? "Good call. Nothing logged." : "Kept. Your plan is still on track."); break; }
-    case "cool-go": { var gid = V.sheet.data.id; openSheet("withdraw", {id:gid}); break; }
+    case "cool-cancel": { var cx = V.sheet.data; closeSheet(); toast(cx.kind === "over" ? "Nothing logged." : "Kept."); break; }
     case "real-lock": { var rl = B(id); snap(); rl.realLock = true; save(); toast(rl.name + " marked as locked.", true); break; }
     case "real-unlock": { var ru = B(id); snap(); ru.realLock = false; save(); toast(ru.name + " marked as not locked.", true); break; }
     case "make-flex": { var mf = B(id); if (!mf) break; snap(); mf.goal = true; mf.fixed = false; mf.amount = 0; mf.order = 6; mf.qpos = goalQueue().reduce(function(m, g){ return Math.max(m, g.qpos || 0); }, 100) + 1; save(); toast(mf.name + " is now a flexible goal.", true); break; }
@@ -1610,7 +1624,7 @@ document.addEventListener("click", function(e){
       ob.retired = true; ob.paused = true; ob.bundle = false; S.quick = S.quick.filter(function(q4){ return q4.budgetId !== ob.id; }); V.open = V.open || {}; V.open[ob.name] = true; closeSheet(); save(); toast(ob.name + " is now " + made.length + " items.", true); break; }
     case "quick": { var q = S.quick[+el.getAttribute("data-i")]; if (!q || !B(q.budgetId)) break; snap(); S.tx.push({id:uid(), type:"out", budgetId:q.budgetId, amount:q.amount, note:q.label, date:today(), at:Date.now()}); save();
       var qv = budgetView(B(q.budgetId)); toast(qv.over ? q.label + " logged. " + B(q.budgetId).name + " is now over." : q.label + " logged. " + naira(Math.max(0, qv.left)) + " left.", true); break; }
-    case "nospend": snap(); S.tx.push({id:uid(), type:"nospend", amount:0, date:today(), at:Date.now()}); save(); toast("No-spend day logged. Streak safe. Well done.", true); break;
+    case "nospend": snap(); S.tx.push({id:uid(), type:"nospend", amount:0, date:today(), at:Date.now()}); save(); toast("No-spend day logged.", true); break;
     case "split": openSheet("split"); break;
     case "opening": { var oa = openingAmount(); if (!oa) break; snap(); S.tx.push({id:uid(), type:"in", opening:true, account:acctByRole("income").id, amount:oa, note:"Money I had at the start", date:today(), at:Date.now()}); save(); openSheet("split", {opening:true}); break; }
     case "log-in": openSheet("log", {mode:"in"}); break;
@@ -1636,12 +1650,14 @@ document.addEventListener("click", function(e){
       var lines = proposeSplit(toAssign()), m = mk(); snap();
       lines.forEach(function(l){ S.tx.push({id:uid(), type:"alloc", budgetId:l.id, amount:l.amount, month:cyc(), date:today(), sf:!!l.sf}); });
       splitMoves(lines).forEach(function(mv){ queueMove(mv.from, mv.to, mv.amount, "Your split"); });
-      if (!sameAcct() && (S.flags[weekStart()] || {}).transfer){ var tu = spendTopUp(); if (tu > 0) queueMove(acctByRole("income").id, acctByRole("spend").id, tu, "Spending until Sunday"); }
-      closeSheet(); save(); toast("Every kobo has a job.", true); break; }
+      if (!sameAcct() && moveEvery() !== "none" && moveFlags().transfer){ var tu = spendTopUp(); if (tu > 0) queueMove(acctByRole("income").id, acctByRole("spend").id, tu, "Spending until Sunday"); }
+      closeSheet(); save(); toast("Split recorded.", true); break; }
     case "budget": openSheet("budget", {id:id}); break;
     case "pay-bill": { var pb = B(id), pv = budgetView(pb), due = pb.amount - pv.paid; if (due <= 0) break; snap(); S.tx.push({id:uid(), type:"out", budgetId:pb.id, amount:due, note:pb.name, date:today(), at:Date.now()}); closeSheet(); save(); toast(pb.name + " marked paid.", true); break; }
-    case "transfer": { var wa = weeklyAllowance(); snap(); if (wa > 0) S.tx.push({id:uid(), type:"move", from:acctByRole("income").id, to:acctByRole("spend").id, amount:wa, date:today()});
-      S.flags[weekStart()] = Object.assign({}, S.flags[weekStart()], {transfer:true}); closeSheet(); save(); toast("Transfer recorded.", true); break; }
+    case "transfer": { var wa = moveAmount(); snap(); if (wa > 0) S.tx.push({id:uid(), type:"move", from:acctByRole("income").id, to:acctByRole("spend").id, amount:wa, date:today()});
+      S.flags[moveKey()] = Object.assign({}, S.flags[moveKey()], {transfer:true}); closeSheet(); save(); toast("Transfer recorded.", true); break; }
+    case "transfer-skip": S.flags[moveKey()] = Object.assign({}, S.flags[moveKey()], {skip:true}); save(); toast("Skipped."); break;
+    case "set-move": { var mv0 = v === "month" || v === "none" ? v : "week"; S.settings.moveEvery = mv0; save(); break; }
     case "check": openSheet("check"); break;
     case "check-run": { var diffs = [], blank = false;
       S.accounts.forEach(function(a){ var raw = val("cb-" + a.id); if (raw === ""){ blank = true; return; } var real = parseAmt(raw), exp = acctBalance(a), df = real - exp; if (Math.abs(df) >= 100) diffs.push({acct:a.id, diff:df, exp:exp}); });
@@ -1656,9 +1672,10 @@ document.addEventListener("click", function(e){
         else S.tx.push({id:uid(), type:"adjust", account:d.acct, amount:d.diff, note:"Balance corrected at check", date:today()}); });
       var full = !cd.blank; S.flags[weekStart()] = Object.assign({}, S.flags[weekStart()], full ? {check:true} : {}, cd.diffs.length ? {mismatch:true} : {}); closeSheet(); save(); toast(full ? "Balance check done. +15 points." : "Checked. Fill in every account to earn the points.", true); break; }
     case "cover": { var cb = B(id), cv = budgetView(cb), buf = bufferBudget(), over = cv.spent - cv.limit; snap(); S.tx.push({id:uid(), type:"cover", from:buf.id, to:cb.id, amount:over, month:cyc(), date:today()}); budgetMove(buf, cb, over); closeSheet(); save(); toast("Covered from " + buf.name + ".", true); break; }
-    case "withdraw-open": { var wbo = B(id); if (protectedPot(wbo)){ var ck = "w" + id, st0 = S.cool[ck]; if (!st0 || Date.now() - st0 > 600000 + 1800000){ st0 = Date.now(); S.cool[ck] = st0; save(); } openSheet("cooldown", {kind:"withdraw", id:id, secs:600, start:st0}); } else openSheet("withdraw", {id:id}); break; }
+    case "withdraw-open": { var wbo = B(id); if (wbo && protectedPot(wbo) && wbo.realLock) openSheet("unlock-first", {id:id}); else openSheet("withdraw", {id:id}); break; }
+    case "unlock-done": { var ub = B(id); if (ub){ ub.realLock = false; save(); openSheet("withdraw", {id:id}); } break; }
     case "withdraw": { var wb = B(id), wamt = parseAmt(val("f-amt")); if (!wamt || wamt > potBalance(wb)){ toast("Enter an amount up to " + naira(potBalance(wb)) + "."); break; }
-      var lb = protectedPot(wb); snap(); delete S.cool["w" + wb.id];
+      var lb = protectedPot(wb); snap();
       S.tx.push({id:uid(), type:"withdraw", budgetId:wb.id, amount:wamt, note:val("f-why"), lockBreak:lb, date:today()});
       S.tx.push({id:uid(), type:"release", amount:wamt, budgetId:wb.id, date:today()});
       if (wb.account && wb.account !== acctByRole("income").id) S.tx.push({id:uid(), type:"move", from:wb.account, to:acctByRole("income").id, amount:wamt, date:today()});
